@@ -22,6 +22,7 @@ from ..dto import (
 )
 from ..react_document_builder import build_react_document_from_draft
 from ..validation import ensure_editorial_page_plan, sanitize_profile_for_render, validate_product_profile
+from dataclasses import replace
 from .crawl import ProductPage
 
 BOILERPLATE = re.compile(
@@ -60,13 +61,34 @@ def clean_ocr_lines(lines: Sequence[str]) -> list[str]:
     return kept
 
 
-def build_user_hints(page: ProductPage, lines: Sequence[str]) -> UserHintsDto:
-    making = " ".join(line for line in lines if any(word in line for word in MAKING_KEYWORDS))
+def build_user_hints(page: ProductPage, lines: Sequence[str], limit: int = 2000) -> UserHintsDto:
+    """What the artisan would paste into the form: the seller copy, then the spec table.
+
+    The gold may only use facts found here or in the photo, so the model never
+    learns to state something its input did not contain.
+    """
+    spec_lines = [f"{key}: {value}" for key, value in page.spec.items() if value]
+    budget = limit - sum(len(line) + 1 for line in spec_lines)
+    kept: list[str] = []
+    for line in lines:
+        if budget - (len(line) + 1) < 0:
+            break
+        kept.append(line)
+        budget -= len(line) + 1
+    making = "\n".join([*kept, *spec_lines])[:limit]
     return UserHintsDto(
         product_name=page.name[:120] or None,
-        making_method=making[:2000] or None,
+        making_method=making or None,
         care_guide=page.notice[:1000] or None,
     )
+
+
+def hint_lines(hints: UserHintsDto) -> list[str]:
+    """The text the analysis model receives, line by line."""
+    lines = [hints.product_name or ""]
+    lines += (hints.making_method or "").splitlines()
+    lines.append(hints.care_guide or "")
+    return [line for line in lines if line]
 
 
 def grounded(text: str, source: Sequence[str], threshold: float = 0.9) -> bool:
@@ -137,6 +159,12 @@ def validate_structured(structured: Structured, source: Sequence[str], *, page: 
         closing_title=label(structured.closing_title, 80),
         closing_description=sentence(structured.closing_description, 300),
     )
+
+
+def page_as_given(page: ProductPage, hints: UserHintsDto) -> ProductPage:
+    """Keep only the spec rows the model will read, so info_table never states unseen facts."""
+    given = set((hints.making_method or "").splitlines())
+    return replace(page, spec={key: value for key, value in page.spec.items() if f"{key}: {value}" in given})
 
 
 def available_blocks(page: ProductPage, structured: Structured) -> set[str]:
@@ -212,8 +240,10 @@ def build_gold_profile(
     category: str,
     structured: Structured,
     archetype: Mapping[str, Any],
+    hints: UserHintsDto,
 ) -> ProductProfileDto | None:
     s = structured
+    page = page_as_given(page, hints)
     sections: list[CopySectionDto] = []
     if s.hero_title and s.hero_description:
         sections.append(CopySectionDto(section_type="hero", title=s.hero_title, description=s.hero_description))
