@@ -271,3 +271,11 @@ def test_products_by_the_same_artist_share_a_group():
 
     assert groups["1"] == groups["2"]
     assert len({groups["1"], groups["3"], groups["4"]}) == 3
+
+
+def test_analysis_row_can_use_the_image_generation_prompt():
+    # The final agent runs with Qwen-Image, so the analyzer sends the image-generation variant.
+    row = analysis_row("images/2457/main.png", png(), gold(), HINTS, image_generation_enabled=True)
+
+    assert "Generated usage-scene availability" in row["messages"][0]["content"][1]["text"]
+    assert "Generated usage-scene availability" not in analysis_row("x.png", png(), gold(), HINTS)["messages"][0]["content"][1]["text"]

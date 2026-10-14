@@ -43,11 +43,18 @@ def split_for(group: str, val_every: int = 10) -> str:
     return "val" if int(hashlib.sha256(group.encode()).hexdigest(), 16) % val_every == 0 else "train"
 
 
-def analysis_row(image_path: str, image: bytes, profile: ProductProfileDto, hints: UserHintsDto) -> dict[str, Any]:
-    """mlx-vlm row: the exact prompt LocalProductAnalyzer sends, answered with the gold profile."""
+def analysis_row(
+    image_path: str, image: bytes, profile: ProductProfileDto, hints: UserHintsDto, *, image_generation_enabled: bool = False,
+) -> dict[str, Any]:
+    """mlx-vlm row: the exact prompt LocalProductAnalyzer sends, answered with the gold profile.
+
+    ``image_generation_enabled`` must match the runtime: it changes the layout candidates and adds
+    the generated usage-scene rule.
+    """
     from local_detail_page_ai.adapters import LocalProductAnalyzer
 
-    prompt, _ = LocalProductAnalyzer(chat_client=None)._base_prompt(hints, hashlib.sha256(image).hexdigest())
+    analyzer = LocalProductAnalyzer(chat_client=None, image_generation_enabled=image_generation_enabled)
+    prompt, _ = analyzer._base_prompt(hints, hashlib.sha256(image).hexdigest())
     answer = json.dumps(profile.model_dump(mode="json"), ensure_ascii=False)
     return {
         "images": [image_path],

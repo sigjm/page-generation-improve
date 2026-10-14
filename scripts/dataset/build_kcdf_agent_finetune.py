@@ -213,13 +213,33 @@ def build(args: argparse.Namespace) -> int:
 
     judge = None if args.no_judge else _teacher(args)
     teacher = "codex" if args.teacher == "codex" else args.text_model
+    # Match the final agent: Qwen-Image on, so analysis prompts and photo sets are the runtime ones.
+    image_generation = bool(args.image_model)
 
     photo_generator = renderer = None
     if not args.skip_render:
         from detail_page_ai.html_renderer import HtmlDetailPageRenderer
         from detail_page_ai.source_photos import SourcePreservingProductPhotoGenerator
 
-        photo_generator = SourcePreservingProductPhotoGenerator()
+        generators = {}
+        if image_generation:
+            from local_detail_page_ai.clients import MlxServeImageClient
+            from local_detail_page_ai.runner import (
+                MlxServeBackgroundGenerator,
+                MlxServeDetailViewGenerator,
+                MlxServeUsageSceneGenerator,
+            )
+
+            image_client = MlxServeImageClient(base_url=args.image_url, model=args.image_model, timeout=900, steps=args.image_steps)
+            generators = {
+                "background_generator": MlxServeBackgroundGenerator(image_client),
+                "usage_scene_generator": MlxServeUsageSceneGenerator(image_client),
+                "detail_view_generator": MlxServeDetailViewGenerator(image_client),
+            }
+        # Same shots and cap as the service defaults (PRODUCT_PHOTO_SHOTS, MAX_GENERATED_PHOTOS).
+        photo_generator = SourcePreservingProductPhotoGenerator(
+            **generators, include_scale=False, photo_roles=("hero", "packshot", "detail", "lifestyle"), max_generated_photos=5,
+        )
         renderer = HtmlDetailPageRenderer()
 
     files = {name: {split: (out / name / f"{split}.jsonl") for split in ("train", "val")} for name in ("vlm", "agent")}
@@ -249,34 +269,23 @@ def build(args: argparse.Namespace) -> int:
         stats[kind] += 1
         stats[f"{kind}:{split}"] += 1
 
-    def write_judged(product_id: str, category: str, request: dict) -> None:
-        """An inspect_* image question the 27B judge answered, as its own vlm example."""
-        suffix = "png" if request["mime_type"] == "image/png" else "jpg"
-        name = f"images/{product_id}-judge-{stats[(product_id, 'judge-image')]}.{suffix}"
-        stats[(product_id, "judge-image")] += 1
-        (out / name).write_bytes(request["image"])
-        write("inspect", "vlm", product_id, category, {
-            "images": [name],
-            "messages": [
-                {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": request["prompt"]}]},
-                {"role": "assistant", "content": [{"type": "text", "text": json.dumps(request["reply"], ensure_ascii=False)}]},
-            ],
-            "teacher": teacher,
-        })
-
+    # 1) Gold profiles, in product order (rules only, fast). Which products carry the analysis
+    #    rows and the one render per group is decided here, so it does not depend on timing.
+    jobs = []
     for product_id, (product_dir, record, structured, per_image) in products.items():
         page = _page(product_dir)
         category = record["category"]
         if not record["images"]["main"] or not (page.spec.get("소재") or page.spec.get("용도")):
             stats["skip:no-main-or-spec"] += 1
             continue
-        lines = ocr_lines(product_dir)
-        hints = build_user_hints(page, lines)
+        hints = build_user_hints(page, ocr_lines(product_dir))
         kept = validate_structured(Structured.model_validate(structured["raw"]), hint_lines(hints), page=page)
         image = _resized_jpeg(product_dir / record["images"]["main"][0])
         image_name = f"images/{product_id}.jpg"
         (out / image_name).write_bytes(image)
-        archetypes = select_layout_archetypes(hashlib.sha256(image).hexdigest(), hints, count=4)
+        archetypes = select_layout_archetypes(
+            hashlib.sha256(image).hexdigest(), hints, count=4, image_generation_enabled=image_generation,
+        )
         archetype = choose_archetype(archetypes, available_blocks(page_as_given(page, hints), kept))
         profile = build_gold_profile(page, category, kept, archetype, hints)
         if profile is None:
@@ -289,51 +298,89 @@ def build(args: argparse.Namespace) -> int:
             print(f"{product_id}: gold failed runtime checks: {exc}", flush=True)
             continue
         group = groups[product_id]
+        analysis = None
         if per_group_analysis[group] < args.max_per_group:
             per_group_analysis[group] += 1
-            write("analysis", "vlm", product_id, category, analysis_row(image_name, image, profile, hints))
+            analysis = analysis_row(image_name, image, profile, hints, image_generation_enabled=image_generation)
+        render = renderer is not None and group not in rendered_groups
+        rendered_groups.add(group)
+        extras = tuple((_resized_jpeg(product_dir / name), "image/jpeg") for name in record["images"].get("extra", [])[:3])
+        jobs.append((product_id, category, hints, profile, image, image_name, extras, analysis, render))
+
+    # 2) Agent conversations in parallel: the teacher's image answers and Qwen-Image photos are slow.
+    def conversations(job) -> list[tuple[str, str, dict]]:
+        product_id, category, hints, profile, image, image_name, extras, analysis, render = job
+        rows = [("analysis", "vlm", analysis)] if analysis else []
+        known = "\n".join(hint_lines(hints))
+        judged_images = 0
+
+        def judged_rows(requests: list[dict]) -> list[tuple[str, str, dict]]:
+            nonlocal judged_images
+            result = []
+            for request in requests:
+                suffix = "png" if request["mime_type"] == "image/png" else "jpg"
+                name = f"images/{product_id}-judge-{judged_images}.{suffix}"
+                judged_images += 1
+                (out / name).write_bytes(request["image"])
+                result.append(("inspect", "vlm", {
+                    "images": [name],
+                    "messages": [
+                        {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": request["prompt"]}]},
+                        {"role": "assistant", "content": [{"type": "text", "text": json.dumps(request["reply"], ensure_ascii=False)}]},
+                    ],
+                    "teacher": teacher,
+                }))
+            return result
 
         revise = bool(profile.features) and _variant(product_id, "revise") < 4
         recover = {0: "check_first", 1: "bad_layout"}.get(_variant(product_id, "recover"))
-        extras = tuple(
-            (_resized_jpeg(product_dir / name), "image/jpeg") for name in record["images"].get("extra", [])[:3]
-        )
         inspect = judge is not None and _variant(product_id, "inspect") < 3
         draft = draft_conversation(
             profile, hints, image, "image/jpeg", revise=revise, recover=recover,
             extra_images=extras, judge=judge, inspect=inspect,
         )
-        known = "\n".join(hint_lines(hints))
         if not judged_ok(draft.get("judge_examples", []), known):
-            stats["judge:bad-reply"] += 1
+            rows.append(("judge:bad-reply", "", {}))
             draft = draft_conversation(profile, hints, image, "image/jpeg", revise=revise, recover=recover, extra_images=extras)
         revise_example = draft.pop("revise_example", None)
         judged = draft.pop("judge_examples", [])
-        write("agent_draft", "agent", product_id, category, draft)
+        rows.append(("agent_draft", "agent", draft))
         if revise_example:
-            write("revise", "vlm", product_id, category, {"images": [image_name], **revise_example})
-        for request in judged:
-            write_judged(product_id, category, request)
+            rows.append(("revise", "vlm", {"images": [image_name], **revise_example}))
+        rows += judged_rows(judged)
 
         for template in pick_edit_templates(runtime_draft(profile, hints), hints, product_id, count=2):
             row = edit_conversation(profile, hints, image, "image/jpeg", template)
             row.pop("result")
-            write(f"agent_edit_{template.name}", "agent", product_id, category, row)
+            rows.append((f"agent_edit_{template.name}", "agent", row))
 
-        if renderer is not None and group not in rendered_groups:
-            rendered_groups.add(group)
+        if render:
             row = render_conversation(
                 profile, hints, image, "image/jpeg", photo_generator=photo_generator, renderer=renderer, judge=judge,
             )
             if not judged_ok(row.get("judge_examples", []), known):
-                stats["judge:bad-reply"] += 1
+                rows.append(("judge:bad-reply", "", {}))
                 row = render_conversation(profile, hints, image, "image/jpeg", photo_generator=photo_generator, renderer=renderer)
             judged = row.pop("judge_examples", [])
-            write("agent_render", "agent", product_id, category, row)
-            for request in judged:
-                write_judged(product_id, category, request)
+            rows.append(("agent_render", "agent", row))
+            rows += judged_rows(judged)
+        print(f"{product_id}: {len(rows)} rows", flush=True)
+        return rows
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        results = list(pool.map(conversations, jobs))
+
+    # 3) Write in product order, so the files do not depend on which worker finished first.
+    for job, rows in zip(jobs, results):
+        product_id, category = job[0], job[1]
+        for kind, file, row in rows:
+            if not file:
+                stats[kind] += 1
+                continue
+            write(kind, file, product_id, category, row)
         stats["products"] += 1
-        print(f"[{stats['products']}] {product_id} {page.name}", flush=True)
 
     summary = {key: value for key, value in sorted(stats.items(), key=str) if isinstance(key, str)}
     summary["groups"] = len(set(groups.values()))
@@ -358,6 +405,10 @@ def main() -> int:
     build_parser.add_argument("--max-per-group", type=int, default=5)
     build_parser.add_argument("--skip-render", action="store_true", help="Skip render conversations (no rembg/Playwright).")
     build_parser.add_argument("--no-judge", action="store_true", help="No inspect_* calls (no teacher image answers).")
+    build_parser.add_argument("--image-url", default="http://127.0.0.1:11234")
+    build_parser.add_argument("--image-model", default="ddalcu/Qwen-Image-2.1-MLX-Serve-4bit",
+                              help="Image model of the final agent; empty for source photos only.")
+    build_parser.add_argument("--image-steps", type=int, default=20, help="Qwen-Image 2.1 needs about 20 steps.")
     build_parser.set_defaults(run=build)
     for sub in (structure_parser, build_parser):
         sub.add_argument("--teacher", choices=("codex", "mlx"), default="codex", help="Labeling model for sorting and image judgments.")
