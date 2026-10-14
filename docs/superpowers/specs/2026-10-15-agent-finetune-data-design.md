@@ -92,3 +92,18 @@
 4. 각본 대화 생성기 + 테스트
 5. 내보내기, 데이터셋 카드, mlx-vlm 로더 확인
 6. Codex 결과 검토 → 반영
+
+## 8. Codex 검토 1 반영 (2026-10-15)
+
+검토 원문: `docs/internal/finetune-data-codex-review-1.md`
+
+| 지적 | 반영 |
+|---|---|
+| 판매자 문구를 `image-visible`로 표시하면 사진에 안 보이는 사실까지 시각 근거로 가르친다 | 정답의 모든 문장을 **모델이 받는 입력 텍스트**(`user_hints`)로 다시 검증한다. 입력에 없는 문장은 버린다. 현재 스키마에 "장인 제공" 근거 값이 없어 분석 프롬프트 관례대로 `image-visible`을 쓰되, 모든 표시가 입력 텍스트로 뒷받침된다. `creator-provided` 근거 값 추가는 서비스 동작 변경이라 별도 제안으로 남긴다 |
+| 상품정보 표가 모델 입력에 없는데 `info_table` 정답에 들어간다 | 장인이 "제작 과정" 칸에 판매 문구와 상품 정보를 붙여 넣은 상황으로 보고, `making_method` = 정리한 OCR 문구 + 상품정보 표 줄(2,000자 이내, 줄 단위로 자름)로 둔다. `info_table`과 `scale_reference`는 입력에 남은 표 줄만 쓴다 |
+| `revise_copy`, 오류 회복, 거절 경로가 없다 | 초안 대화 변형 추가. ① `revise_copy`: 특징 하나를 근거 미확인으로 둔 분석 결과에서 시작해, 판매자 원문으로 다시 확인. 내부 `revise_copy` JSON 호출도 별도 예제로 내보냄. ② 오류 회복: 분석 전에 `check_copy_grounding` 호출 → 실제 도구 오류 → `analyze_photos`. 잘못된 `layout_id` 인자 → 실제 검증 오류 → 올바른 인자로 재호출. ③ 편집: 지시(`creator-instruction`), 다듬기(긴 설명의 첫 문장만 남기기, `rephrase`), 장인 입력(`user-hints`), 근거 없는 주장 거절(`inferred`) |
+| `inspect_photo`, `inspect_render`가 없다 | 정답 판단(사진이나 렌더에서 무엇이 보이는지)을 모델 없이 만들 수 없어 이번 범위에서 뺀다. 사진이 1장인 상품은 `inspect_photo`를 부르지 않는 경로만 담긴다. 한계로 데이터셋 카드에 적는다 |
+| OpenAI와 mlx-vlm 형식을 한 파일로 겸용하지 마라. 이미지 과제와 도구 대화를 분리하라 | 세 가지 파일로 내보낸다. `vlm/{train,val}.jsonl`(분석·`revise_copy` 내부 호출, mlx-vlm 형식 `images` + `{"type":"image"}` 콘텐츠), `agent/{train,val}.jsonl`(텍스트 전용 `messages` + `tools`), `meta.jsonl`(id·kind·상품·묶음·분류·split·출처). 대상 모델 채팅 템플릿으로 렌더링되는지 확인한다 |
+| 같은 작가·시리즈가 train과 val에 나뉘면 누수 | 정리 후 같은 문구 이미지를 공유하는 상품을 한 묶음으로 보고 묶음 단위로 나눈다. 공통 배너처럼 정리 후 비는 이미지는 묶음 판단에서 뺀다 |
+| 대화 중 도구 목록이 바뀔 수 있다 | 각본 대화는 횟수 상한에 닿지 않아 목록이 바뀌지 않는다. 마지막 요청의 도구 목록을 저장한다 |
+
