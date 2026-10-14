@@ -305,3 +305,11 @@ def test_exhausted_tools_are_no_longer_offered():
 
     offered = [{schema["function"]["name"] for schema in request[1]} for request in client.requests]
     assert offered == [{"echo", "boom", "finish"}, {"boom", "finish"}]
+
+
+def test_capped_tools_state_their_limit_up_front():
+    # Live MLX run: the model asked for 8 inspect_render calls in one turn
+    # because nothing told it about the 2-call cap before it planned.
+    tool = Tool("inspect", "검수한다.", NoArgs, lambda state, args: {}, max_calls=2)
+
+    assert tool.schema()["function"]["description"] == "검수한다. 최대 2회까지 부를 수 있다."

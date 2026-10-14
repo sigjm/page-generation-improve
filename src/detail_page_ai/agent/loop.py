@@ -52,11 +52,14 @@ class Tool:
     max_calls: int | None = None
 
     def schema(self) -> dict[str, Any]:
+        description = self.description
+        if self.max_calls is not None:
+            description += f" 최대 {self.max_calls}회까지 부를 수 있다."
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self.description,
+                "description": description,
                 "parameters": self.args_model.model_json_schema(),
             },
         }

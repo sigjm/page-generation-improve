@@ -47,11 +47,12 @@ def creator_data_block(user_hints: UserHintsDto | None) -> str:
 
 
 def draft_user_prompt(photo_count: int, user_hints: UserHintsDto | None) -> str:
-    return (
-        f"사진 {photo_count}장이 있다. 0번이 대표 사진이고, "
-        "나머지는 inspect_photo의 index로 볼 수 있다.\n"
-        f"{creator_data_block(user_hints)}"
+    extra = (
+        f"1~{photo_count - 1}번은 inspect_photo의 index로 볼 수 있다."
+        if photo_count > 1
+        else "추가 사진은 없다."
     )
+    return f"사진 {photo_count}장이 있다. 0번이 대표 사진이다. {extra}\n{creator_data_block(user_hints)}"
 
 
 def inspect_prompt(question: str) -> str:

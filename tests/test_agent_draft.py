@@ -340,3 +340,10 @@ def test_rewrite_without_an_evidence_label_counts_as_inferred():
 
     assert agent.last_runs["draft"]["trace"][1]["outcome"] == "ok"
     assert "다양한 활용" not in [section.title for section in result.profile.copy_sections]
+
+
+def test_user_prompt_says_when_there_are_no_extra_photos():
+    from detail_page_ai.agent.prompts import draft_user_prompt
+
+    assert "추가 사진은 없다" in draft_user_prompt(1, None)
+    assert "1~2번" in draft_user_prompt(3, None)
