@@ -381,4 +381,4 @@ def test_text_server_parses_tool_calls() -> None:
     )
 
     text_line, _ = command_lines(result)
-    assert "--tool-call-parser qwen25" in text_line
+    assert "--tool-call-parser qwen3_coder" in text_line
