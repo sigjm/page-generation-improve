@@ -302,10 +302,12 @@ def render_tools(
         return state.photo_set
 
     def find(state: AgentState, photo_id: str) -> ProductPhoto:
-        for photo in require_photos(state).photos:
+        photos = require_photos(state).photos
+        for photo in photos:
             if photo.photo_id == photo_id:
                 return photo
-        raise ValueError(f"없는 photo_id입니다: {photo_id}")
+        available = ", ".join(photo.photo_id for photo in photos)
+        raise ValueError(f"없는 photo_id입니다: {photo_id}. 있는 사진: {available}")
 
     def review(image: bytes, question: str) -> dict[str, Any]:
         return _ImageReview.model_validate(

@@ -314,3 +314,21 @@ def test_photos_are_prepared_at_most_once():
     render(build(DetailPageAgent, client, CountingGenerator()))
 
     assert CountingGenerator.calls == 1
+
+
+def test_unknown_photo_ids_come_back_with_the_ids_that_exist():
+    # Live run with Qwen3.5-4B: the model passed section ids ("statement") as
+    # photo ids three times in a row and the render loop gave up.
+    client = ScriptedClient(
+        turns=[
+            turn(call("prepare_photos")),
+            turn(call("inspect_image", {"photo_id": "statement", "question": "괜찮은가?"})),
+            turn(call("finish")),
+        ]
+    )
+    agent = build(DetailPageAgent, client)
+
+    render(agent)
+
+    detail = agent.last_runs["render"]["trace"][1]["result"]["detail"]
+    assert "hero" in detail and "lifestyle-02" in detail
