@@ -155,6 +155,7 @@ class ProductPage:
     detail_images: list[str] = field(default_factory=list)
     spec: dict[str, str] = field(default_factory=dict)
     notice: str = ""
+    brand: str = ""  # the artist, from the page's JSON-LD
 
 
 def parse_product_page(page: str) -> ProductPage:
@@ -195,6 +196,7 @@ def parse_product_page(page: str) -> ProductPage:
     notice_at = before_spec.rfind("유의사항")
     notice = _text(before_spec[notice_at + len("유의사항"):]) if notice_at >= 0 else ""
 
+    brand = re.search(r'"brand"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]*)"', page)
     return ProductPage(
         name=name,
         main_image=og.group(1) if og else None,
@@ -202,6 +204,7 @@ def parse_product_page(page: str) -> ProductPage:
         detail_images=detail_images,
         spec=spec,
         notice=notice,
+        brand=brand.group(1).strip() if brand else "",
     )
 
 

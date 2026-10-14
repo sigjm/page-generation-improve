@@ -146,7 +146,9 @@ def test_gold_profile_follows_the_archetype_and_passes_runtime_checks():
     ]
     info = next(block for block in profile.page_plan if block.block_type == "info_table")
     assert [(item.label, item.value) for item in info.items][:2] == [("소재", "원목"), ("규격", "W120 x D80 x H60mm")]
-    assert all(section.evidence == "image-visible" for section in profile.copy_sections)
+    assert {section.evidence for section in profile.copy_sections} == {"creator-provided"}
+    assert {feature.evidence for feature in profile.features} == {"creator-provided"}
+    assert {item.evidence for item in info.items} == {"creator-provided"}
     check_gold(profile, hints)
 
 
@@ -269,3 +271,11 @@ def test_ocr_typos_do_not_pass_as_grounded():
 
     assert grounded("곁을 은은하게 밝혀주는 호롱으로 완성했습니다", source)
     assert not grounded("고측을 은은하게 밝혀주는 호롱으로 완성했습니다.", source)
+
+
+def test_legal_and_service_boilerplate_is_dropped_from_the_care_notice():
+    from detail_page_ai.finetune.gold import clean_notice
+
+    notice = "직사광선을 피해 주세요. 품질보증기준 관련 법률 및 소비자분쟁해결기준에 따릅니다. A/S 안내 고객센터: 1588-0000"
+
+    assert clean_notice(notice) == "직사광선을 피해 주세요."

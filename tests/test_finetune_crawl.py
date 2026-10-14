@@ -180,3 +180,9 @@ def test_crawl_stops_when_a_list_page_repeats_and_resumes(tmp_path):
     requested.clear()
     assert crawl_shop(tmp_path, fetcher(), categories={"578": "전체"}, log=lambda _: None) == 2
     assert not any("/category/578/display" in url for url in requested)
+
+
+def test_product_page_reads_the_artist_from_json_ld():
+    page = parse_product_page((FIXTURES / "product.html").read_text(encoding="utf-8"))
+
+    assert page.brand == "합성 작가"

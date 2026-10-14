@@ -153,7 +153,7 @@ def build(args: argparse.Namespace) -> int:
         render_conversation,
         runtime_draft,
     )
-    from detail_page_ai.finetune.export import analysis_row, group_products, split_for
+    from detail_page_ai.finetune.export import analysis_row, group_products, judged_ok, split_for
     from detail_page_ai.finetune.gold import (
         available_blocks,
         build_gold_profile,
@@ -186,7 +186,13 @@ def build(args: argparse.Namespace) -> int:
             for name, lines in per_image.items()
         }
         for product_id, (product_dir, _, _, per_image) in products.items()
-    })
+    }, brands={product_id: _page(product_dir).brand for product_id, (product_dir, *_) in products.items()})
+
+    from local_detail_page_ai.clients import MlxServeChatClient
+
+    judge = None
+    if args.judge_url:
+        judge = MlxServeChatClient(base_url=args.judge_url, model=args.judge_model, timeout=600, max_tokens=1024)
 
     photo_generator = renderer = None
     if not args.skip_render:
@@ -218,9 +224,25 @@ def build(args: argparse.Namespace) -> int:
             handle.write(json.dumps({
                 "id": row_id, "kind": kind, "file": f"{file}/{split}.jsonl", "product_id": product_id,
                 "group": group, "category": category, "split": split, "source_url": products[product_id][1]["source_url"],
+                "artist": _page(products[product_id][0]).brand,
             }, ensure_ascii=False) + "\n")
         stats[kind] += 1
         stats[f"{kind}:{split}"] += 1
+
+    def write_judged(product_id: str, category: str, request: dict) -> None:
+        """An inspect_* image question the 27B judge answered, as its own vlm example."""
+        suffix = "png" if request["mime_type"] == "image/png" else "jpg"
+        name = f"images/{product_id}-judge-{stats[(product_id, 'judge-image')]}.{suffix}"
+        stats[(product_id, "judge-image")] += 1
+        (out / name).write_bytes(request["image"])
+        write("inspect", "vlm", product_id, category, {
+            "images": [name],
+            "messages": [
+                {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": request["prompt"]}]},
+                {"role": "assistant", "content": [{"type": "text", "text": json.dumps(request["reply"], ensure_ascii=False)}]},
+            ],
+            "teacher": args.judge_model,
+        })
 
     for product_id, (product_dir, record, structured, per_image) in products.items():
         page = _page(product_dir)
@@ -253,11 +275,25 @@ def build(args: argparse.Namespace) -> int:
 
         revise = bool(profile.features) and _variant(product_id, "revise") < 4
         recover = {0: "check_first", 1: "bad_layout"}.get(_variant(product_id, "recover"))
-        draft = draft_conversation(profile, hints, image, "image/jpeg", revise=revise, recover=recover)
+        extras = tuple(
+            (_resized_jpeg(product_dir / name), "image/jpeg") for name in record["images"].get("extra", [])[:3]
+        )
+        inspect = judge is not None and _variant(product_id, "inspect") < 3
+        draft = draft_conversation(
+            profile, hints, image, "image/jpeg", revise=revise, recover=recover,
+            extra_images=extras, judge=judge, inspect=inspect,
+        )
+        known = "\n".join(hint_lines(hints))
+        if not judged_ok(draft.get("judge_examples", []), known):
+            stats["judge:bad-reply"] += 1
+            draft = draft_conversation(profile, hints, image, "image/jpeg", revise=revise, recover=recover, extra_images=extras)
         revise_example = draft.pop("revise_example", None)
+        judged = draft.pop("judge_examples", [])
         write("agent_draft", "agent", product_id, category, draft)
         if revise_example:
             write("revise", "vlm", product_id, category, {"images": [image_name], **revise_example})
+        for request in judged:
+            write_judged(product_id, category, request)
 
         for template in pick_edit_templates(runtime_draft(profile, hints), hints, product_id, count=2):
             row = edit_conversation(profile, hints, image, "image/jpeg", template)
@@ -266,8 +302,16 @@ def build(args: argparse.Namespace) -> int:
 
         if renderer is not None and group not in rendered_groups:
             rendered_groups.add(group)
-            row = render_conversation(profile, hints, image, "image/jpeg", photo_generator=photo_generator, renderer=renderer)
+            row = render_conversation(
+                profile, hints, image, "image/jpeg", photo_generator=photo_generator, renderer=renderer, judge=judge,
+            )
+            if not judged_ok(row.get("judge_examples", []), known):
+                stats["judge:bad-reply"] += 1
+                row = render_conversation(profile, hints, image, "image/jpeg", photo_generator=photo_generator, renderer=renderer)
+            judged = row.pop("judge_examples", [])
             write("agent_render", "agent", product_id, category, row)
+            for request in judged:
+                write_judged(product_id, category, request)
         stats["products"] += 1
         print(f"[{stats['products']}] {product_id} {page.name}", flush=True)
 
@@ -295,6 +339,8 @@ def main() -> int:
     build_parser = commands.add_parser("build", help="Write analysis rows and agent conversations.")
     build_parser.add_argument("--max-per-group", type=int, default=5)
     build_parser.add_argument("--skip-render", action="store_true", help="Skip render conversations (no rembg/Playwright).")
+    build_parser.add_argument("--judge-url", default="http://127.0.0.1:11234", help="Vision model for inspect_* answers; empty to skip.")
+    build_parser.add_argument("--judge-model", default="ddalcu/Qwen3.8-27B-MLX-Serve-4bit")
     build_parser.set_defaults(run=build)
     args = parser.parse_args()
     return args.run(args)
@@ -302,3 +348,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

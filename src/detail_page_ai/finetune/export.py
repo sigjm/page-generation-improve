@@ -2,17 +2,20 @@
 
 import hashlib
 import json
+import re
 from typing import Any
 
 from ..dto import ProductProfileDto, UserHintsDto
 
 
-def group_products(products: dict[str, dict[str, list[str]]]) -> dict[str, str]:
-    """Products that share a detail image with real text (an artist bio, a series story)
-    form one group, so near-duplicates never land on both sides of the split.
+def group_products(
+    products: dict[str, dict[str, list[str]]], brands: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Products by the same artist, or sharing a detail image with real text (an artist bio,
+    a series story), form one group, so near-duplicates never land on both sides of the split.
 
     ``products`` maps product id → {image sha256 → cleaned OCR lines of that image}.
-    Images whose cleaned text is empty (shop-wide banners) do not link products.
+    Images whose cleaned text is empty (shop-wide banners) and empty brands do not link products.
     """
     parent = {product_id: product_id for product_id in products}
 
@@ -24,7 +27,8 @@ def group_products(products: dict[str, dict[str, list[str]]]) -> dict[str, str]:
 
     owner: dict[str, str] = {}
     for product_id, images in sorted(products.items()):
-        for image_hash, lines in images.items():
+        brand = (brands or {}).get(product_id, "")
+        for image_hash, lines in [*images.items(), *([(f"brand:{brand}", [brand])] if brand else [])]:
             if not lines:
                 continue
             if image_hash in owner:
@@ -52,3 +56,19 @@ def analysis_row(image_path: str, image: bytes, profile: ProductProfileDto, hint
             {"role": "assistant", "content": [{"type": "text", "text": answer}]},
         ],
     }
+
+
+def judged_ok(requests: list[dict], known: str = "") -> bool:
+    """Judge replies we would train on: a non-empty answer, a valid verdict field, and any
+    quoted text spelled as the artisan wrote it (the judge sometimes misreads rendered text)."""
+    compact = re.sub(r"\W+", "", known)
+
+    def ok(reply: dict) -> bool:
+        if not isinstance(reply.get("answer"), str) or not reply["answer"].strip():
+            return False
+        quoted = re.findall(r"['‘\"“]([^'’\"”]{2,40})['’\"”]", reply["answer"])
+        if any(re.sub(r"\W+", "", text) not in compact for text in quoted):
+            return False
+        return reply.get("evidence") in {"image-visible", "inferred"} or isinstance(reply.get("has_problem"), bool)
+
+    return all(ok(request["reply"]) for request in requests)

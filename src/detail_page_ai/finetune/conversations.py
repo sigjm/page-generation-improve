@@ -14,7 +14,10 @@ from ..agent.detail_page_agent import DetailPageAgent
 from ..dto import AiBePersistAck, ApprovedDraftDto, ProductProfileDto, UserHintsDto
 from ..validation import ensure_editorial_page_plan, sanitize_profile_for_render
 
-Call = tuple[str, dict[str, Any]]
+# Arguments may be a function of the conversation so far (e.g. finish reports what tools returned).
+Call = tuple[str, dict[str, Any] | Callable[[list[dict]], dict[str, Any]]]
+INSPECT_PHOTO_QUESTION = "이 사진에서 보이는 형태, 표면, 구성품을 설명해 주세요."
+INSPECT_IMAGE_QUESTION = "제품이 잘리거나 형태가 원본과 다르게 보이는 곳이 있나요?"
 FIXED_BLOCKS = {"hero", "closing"}
 BLOCK_NAMES = {
     "statement": "소개 문단", "feature_grid": "특징 목록", "detail_split": "디테일", "gallery": "사진 모음",
@@ -30,11 +33,15 @@ CLAIMS = (
 
 
 class ScriptClient:
-    """Plays a fixed list of tool calls and keeps every request the agent made."""
+    """Plays a fixed list of tool calls and keeps every request the agent made.
 
-    def __init__(self, calls: list[Call], json_replies: list[dict] = ()):
+    Image judgments (inspect_*) go to ``judge``, a real vision model, when one is given.
+    """
+
+    def __init__(self, calls: list[Call], json_replies: list[dict] = (), judge=None):
         self.calls = list(calls)
         self.json_replies = list(json_replies)
+        self.judge = judge
         self.requests: list[tuple[list[dict], list[dict]]] = []
         self.replies: list[dict] = []
         self.json_requests: list[dict] = []
@@ -42,6 +49,8 @@ class ScriptClient:
     def chat_with_tools(self, messages, tools):
         self.requests.append(([dict(message) for message in messages], tools))
         name, arguments = self.calls.pop(0)
+        if callable(arguments):
+            arguments = arguments(messages)
         reply = {
             "content": "",
             "tool_calls": [{
@@ -54,9 +63,17 @@ class ScriptClient:
         return reply
 
     def generate_json(self, prompt, *, image=None, mime_type=None, json_schema=None):
-        reply = self.json_replies.pop(0)
-        self.json_requests.append({"prompt": prompt, "reply": reply})
+        if self.json_replies:
+            reply, source = self.json_replies.pop(0), "script"
+        elif self.judge is not None:
+            reply, source = self.judge.generate_json(prompt, image=image, mime_type=mime_type), "judge"
+        else:
+            raise AssertionError("no scripted reply or judge for this image question")
+        self.json_requests.append({"prompt": prompt, "image": image, "mime_type": mime_type, "reply": reply, "source": source})
         return reply
+
+    def judged(self) -> list[dict]:
+        return [request for request in self.json_requests if request["source"] == "judge"]
 
     def transcript(self) -> dict[str, Any]:
         """The full conversation, with tool-call arguments as mappings (what Qwen templates expect)."""
@@ -126,6 +143,23 @@ def runtime_draft(profile: ProductProfileDto, hints: UserHintsDto) -> ApprovedDr
     return ApprovedDraftDto.from_profile(sanitize_profile_for_render(ensure_editorial_page_plan(profile), user_hints=hints))
 
 
+def _tool_results(messages: list[dict]) -> list[tuple[str, dict]]:
+    """(tool name, parsed result) for every tool message so far."""
+    names = {
+        call["id"]: call["function"]["name"]
+        for message in messages if message["role"] == "assistant"
+        for call in message.get("tool_calls", [])
+    }
+    results = []
+    for message in messages:
+        if message["role"] == "tool":
+            try:
+                results.append((names.get(message["tool_call_id"], ""), json.loads(message["content"])))
+            except json.JSONDecodeError:
+                results.append((names.get(message["tool_call_id"], ""), {}))
+    return results
+
+
 def draft_conversation(
     profile: ProductProfileDto,
     hints: UserHintsDto,
@@ -134,13 +168,19 @@ def draft_conversation(
     *,
     revise: bool = False,
     recover: str | None = None,
+    extra_images: tuple[tuple[bytes, str], ...] = (),
+    judge=None,
+    inspect: bool = False,
 ) -> dict[str, Any]:
     analysis = profile
     calls: list[Call] = []
     json_replies: list[dict] = []
+    inspect = inspect and bool(extra_images) and judge is not None
     if recover == "check_first":
         calls.append(("check_copy_grounding", {}))
     calls.append(("analyze_photos", {}))
+    if inspect:
+        calls.append(("inspect_photo", {"index": 1, "question": INSPECT_PHOTO_QUESTION}))
     calls.append(("check_copy_grounding", {}))
     if revise:
         feature = profile.features[0]
@@ -150,21 +190,31 @@ def draft_conversation(
         )
         calls.append(("revise_copy", {"targets": ["features.0"]}))
         json_replies.append({"items": [{
-            "target": "features.0", "title": feature.title, "description": feature.description, "evidence": "image-visible",
+            "target": "features.0", "title": feature.title, "description": feature.description, "evidence": "creator-provided",
         }]})
     if recover == "bad_layout":
         calls.append(("plan_page", {"layout_id": "bento-grid"}))
     calls.append(("plan_page", {}))
-    calls.append(("finish", {
-        "summary": f"{profile.display_name or profile.product_type} 초안: 문구 {len(profile.copy_sections)}개, 블록 {len(profile.page_plan)}개"
-    }))
-    client = ScriptClient(calls, json_replies)
+    parts = [
+        f"{profile.display_name or profile.product_type} 초안: 블록 {len(profile.page_plan)}개"
+        f"({', '.join(block.block_type for block in profile.page_plan)})",
+        f"장인 입력으로 확인한 문구 {len(profile.copy_sections)}개",
+    ]
+    if revise:
+        parts.append("근거가 부족했던 특징 1개를 장인 입력으로 확인")
+    if inspect:
+        parts.append("추가 사진 1장을 확인")
+    calls.append(("finish", {"summary": ". ".join(parts) + "."}))
+    client = ScriptClient(calls, json_replies, judge=judge)
     agent = _agent(client, GoldAnalyzer(analysis))
-    agent.create_draft("finetune", "finetune", image, mime_type, user_hints=hints)
+    agent.create_draft(
+        "finetune", "finetune", image, mime_type, user_hints=hints, additional_source_images=extra_images,
+    )
     _finished(agent, "draft")
     row = client.transcript()
+    row["judge_examples"] = client.judged()
     if revise:
-        request = client.json_requests[0]
+        request = next(request for request in client.json_requests if request["source"] == "script")
         row["revise_example"] = {
             "messages": [
                 {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": request["prompt"]}]},
@@ -172,6 +222,25 @@ def draft_conversation(
             ]
         }
     return row
+
+
+def _retry_photo_id(messages: list[dict]) -> str:
+    """A real photo id from prepare_photos, preferring one that is not the hero."""
+    photos = next(r.get("photos", []) for name, r in _tool_results(messages) if name == "prepare_photos")
+    ids = [photo["photo_id"] for photo in photos]
+    return next((photo_id for photo_id in ids if photo_id != "hero"), ids[0])
+
+
+def _render_finish(messages: list[dict]) -> dict[str, Any]:
+    results = _tool_results(messages)
+    photos = next((r.get("photos", []) for name, r in reversed(results) if name == "verify_photos"), [])
+    sections = next((r.get("sections", []) for name, r in reversed(results) if name == "render_page"), [])
+    reviews = [r for name, r in results if name == "inspect_render" and "has_problem" in r]
+    warnings = [f"{r['section_id']}: {r['answer']}" for r in reviews if r["has_problem"]]
+    summary = f"사진 {len(photos)}장을 검증하고 섹션 {len(sections)}개를 렌더했다."
+    if reviews:
+        summary += f" 섹션 {len(reviews)}개를 검수했다."
+    return {"summary": summary, "warnings": warnings}
 
 
 def render_conversation(
@@ -182,22 +251,31 @@ def render_conversation(
     *,
     photo_generator,
     renderer,
+    judge=None,
 ) -> dict[str, Any]:
-    calls: list[Call] = [
-        ("prepare_photos", {}),
-        ("verify_photos", {}),
-        ("render_page", {}),
-        ("finish", {"summary": f"{profile.display_name or profile.product_type} 렌더 완료", "warnings": []}),
-    ]
-    client = ScriptClient(calls)
-    agent = _agent(client, _Unused(), photo_generator=photo_generator, renderer=renderer)
     approved = runtime_draft(profile, hints)
+    calls: list[Call] = [("prepare_photos", {}), ("verify_photos", {})]
+    if judge is not None:
+        # A section name used as a photo id: the tool error lists the real ids, then a valid retry.
+        wrong = next(block.section_id for block in approved.page_plan if block.block_type != "hero")
+        calls += [
+            ("inspect_image", {"photo_id": wrong, "question": INSPECT_IMAGE_QUESTION}),
+            ("inspect_image", lambda messages: {"photo_id": _retry_photo_id(messages), "question": INSPECT_IMAGE_QUESTION}),
+        ]
+    calls.append(("render_page", {}))
+    if judge is not None:
+        calls += [("inspect_render", {"section_index": 0}), ("inspect_render", {"section_index": 1})]
+    calls.append(("finish", _render_finish))
+    client = ScriptClient(calls, judge=judge)
+    agent = _agent(client, _Unused(), photo_generator=photo_generator, renderer=renderer)
     agent.run(
         "finetune", "finetune", image, mime_type,
         user_hints=hints, profile_override=approved.to_profile(profile),
     )
     _finished(agent, "render")
-    return client.transcript()
+    row = client.transcript()
+    row["judge_examples"] = client.judged()
+    return row
 
 
 @dataclass(frozen=True)

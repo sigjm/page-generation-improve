@@ -30,6 +30,7 @@ BOILERPLATE = re.compile(
     r"|^(19|20)\d{2}(?!\d)",  # artist CV lines ("2022 ... Fair (Seoul)") shared across a series
     re.I,
 )
+NOTICE_BOILERPLATE = re.compile(r"품질보증|소비자분쟁|A/S|고객센터|상담\s*시간|\d{3,4}-\d{4}|교환|반품|배송")
 MAKING_KEYWORDS = (
     "제작", "공정", "손으로", "수작업", "빚", "가마", "옻칠", "자개", "엮", "염색",
     "바느질", "깎", "조각", "짜임", "직조", "상감", "유약", "마감", "소성", "땜",
@@ -41,6 +42,7 @@ MATERIAL_CRAFT = (
     ("면", "섬유공예"), ("린넨", "섬유공예"), ("모시", "섬유공예"), ("견", "섬유공예"),
 )
 GALLERY_PHOTOS = ["packshot", "detail", "lifestyle"]
+CREATOR = "creator-provided"  # the seller's own words, given to the model as user_hints
 
 
 def _norm(text: str) -> str:
@@ -96,8 +98,13 @@ def build_user_hints(page: ProductPage, lines: Sequence[str], limit: int = 2000)
     return UserHintsDto(
         product_name=page.name[:120] or None,
         making_method=making or None,
-        care_guide=page.notice[:1000] or None,
+        care_guide=clean_notice(page.notice)[:1000] or None,
     )
+
+
+def clean_notice(text: str) -> str:
+    """The care notice without the legal and customer-service lines every product repeats."""
+    return " ".join(sentence for sentence in _sentences(text) if not NOTICE_BOILERPLATE.search(sentence))
 
 
 def hint_lines(hints: UserHintsDto) -> list[str]:
@@ -198,7 +205,7 @@ def available_blocks(page: ProductPage, structured: Structured) -> set[str]:
         blocks.add("info_table")
     if page.spec.get("규격"):
         blocks.add("scale_reference")
-    if page.notice:
+    if clean_notice(page.notice):
         blocks.add("notice")
     if structured.closing_title:
         blocks.add("closing")
@@ -221,7 +228,9 @@ def _block(block_type: str, variant: str, page: ProductPage, s: Structured) -> P
     if block_type == "statement" and s.making:
         return PageBlockDto(**common, body=" ".join(s.making)[:500])
     if block_type == "feature_grid" and len(s.features) >= 2:
-        return PageBlockDto(**common, items=[PageBlockItemDto(label=f["title"], description=f["description"]) for f in s.features])
+        return PageBlockDto(**common, items=[
+            PageBlockItemDto(label=f["title"], description=f["description"], evidence=CREATOR) for f in s.features
+        ])
     if block_type == "detail_split" and (s.features or s.making):
         if s.features:
             return PageBlockDto(**common, title=s.features[0]["title"], body=s.features[0]["description"], photo_id="detail")
@@ -233,11 +242,16 @@ def _block(block_type: str, variant: str, page: ProductPage, s: Structured) -> P
     if block_type == "usage_scene" and s.usage:
         return PageBlockDto(**common, body=s.usage[0], photo_id="lifestyle")
     if block_type == "info_table" and page.spec:
-        return PageBlockDto(**common, items=[PageBlockItemDto(label=key, value=value[:180]) for key, value in page.spec.items() if value][:8])
+        return PageBlockDto(**common, items=[
+            PageBlockItemDto(label=key, value=value[:180], evidence=CREATOR) for key, value in page.spec.items() if value
+        ][:8])
     if block_type == "scale_reference" and page.spec.get("규격"):
-        return PageBlockDto(**common, items=[PageBlockItemDto(label="규격", value=page.spec["규격"][:180])])
-    if block_type == "notice" and page.notice:
-        return PageBlockDto(**common, items=[PageBlockItemDto(label="유의사항", description=text[:300]) for text in _sentences(page.notice)][:8])
+        return PageBlockDto(**common, items=[PageBlockItemDto(label="규격", value=page.spec["규격"][:180], evidence=CREATOR)])
+    if block_type == "notice" and clean_notice(page.notice):
+        return PageBlockDto(**common, items=[
+            PageBlockItemDto(label="유의사항", description=text[:300], evidence=CREATOR)
+            for text in _sentences(clean_notice(page.notice))
+        ][:8])
     if block_type == "closing" and s.closing_title:
         return PageBlockDto(**common, title=s.closing_title, body=s.closing_description)
     return None
@@ -252,13 +266,15 @@ def build_gold_profile(
 ) -> ProductProfileDto | None:
     s = structured
     page = page_as_given(page, hints)
+    given = hint_lines(hints)
     sections: list[CopySectionDto] = []
     if s.hero_title and s.hero_description:
-        sections.append(CopySectionDto(section_type="hero", title=s.hero_title, description=s.hero_description))
+        sections.append(CopySectionDto(section_type="hero", title=s.hero_title, description=s.hero_description, evidence=CREATOR))
     for feature in s.features:
-        sections.append(CopySectionDto(section_type="feature", title=feature["title"], description=feature["description"]))
-    if s.closing_title:
-        sections.append(CopySectionDto(section_type="closing", title=s.closing_title, description=s.closing_description or s.closing_title))
+        sections.append(CopySectionDto(section_type="feature", title=feature["title"], description=feature["description"], evidence=CREATOR))
+    closing = s.closing_description or s.closing_title
+    if s.closing_title and grounded(closing, given):  # a label-only title is not the artisan's sentence
+        sections.append(CopySectionDto(section_type="closing", title=s.closing_title, description=closing, evidence=CREATOR))
     summary = s.summary or s.hero_description or (s.making[0] if s.making else "")
     if len(sections) < 2 or not sections[0].section_type == "hero" or not summary:
         return None
@@ -288,7 +304,7 @@ def build_gold_profile(
         keywords=keywords,
         observations={key: page.spec[key] for key in ("소재", "규격", "구성") if page.spec.get(key)},
         features=[
-            ProductFeatureDto(title=f["title"], description=f["description"], evidence="image-visible", confidence=0.8)
+            ProductFeatureDto(title=f["title"], description=f["description"], evidence=CREATOR, confidence=0.8)
             for f in s.features
         ],
         copy_sections=sections,

@@ -93,7 +93,7 @@ def test_revise_variant_rechecks_a_feature_against_seller_text():
     example = row["revise_example"]
     assert example["messages"][0]["content"][0] == {"type": "image"}
     assert "<creator_data>" in example["messages"][0]["content"][1]["text"]
-    assert json.loads(example["messages"][1]["content"][0]["text"])["items"][0]["evidence"] == "image-visible"
+    assert json.loads(example["messages"][1]["content"][0]["text"])["items"][0]["evidence"] == "creator-provided"
 
 
 def test_recovery_variants_contain_real_tool_errors():
@@ -191,3 +191,83 @@ def test_recorded_tool_call_arguments_are_mappings_for_the_qwen_template():
     calls = [call for m in row["messages"] if m["role"] == "assistant" for call in m.get("tool_calls", [])]
     assert all(isinstance(call["function"]["arguments"], dict) for call in calls)
     assert calls[-3]["function"]["arguments"] == {"layout_id": "bento-grid"}
+
+
+class FakeJudge:
+    """Stands in for the 27B judge: answers inspection prompts about real images."""
+
+    def __init__(self, problem_on_call=None):
+        self.calls = 0
+        self.problem_on_call = problem_on_call
+
+    def generate_json(self, prompt, *, image=None, mime_type=None, json_schema=None):
+        self.calls += 1
+        if "검수" in prompt:
+            return {"answer": "글자 넘침이 보입니다." if self.calls == self.problem_on_call else "문제없습니다.",
+                    "has_problem": self.calls == self.problem_on_call}
+        return {"answer": "옆면에 이어 붙인 나무 결이 보입니다.", "evidence": "image-visible"}
+
+
+def test_draft_can_inspect_an_extra_photo_with_the_judge():
+    judge = FakeJudge()
+    row = draft_conversation(gold(), HINTS, png(), "image/png", extra_images=((png(), "image/png"),), judge=judge, inspect=True)
+
+    assert tool_names(row["messages"])[:2] == ["analyze_photos", "inspect_photo"]
+    assert row["judge_examples"][0]["reply"]["evidence"] == "image-visible"
+    assert "추가 사진" in json.loads(json.dumps(row["messages"][-1]["tool_calls"][0]["function"]["arguments"]))["summary"]
+
+
+def test_render_with_the_judge_recovers_from_a_wrong_photo_id_and_stops_at_the_cap():
+    from detail_page_ai.finetune.conversations import render_conversation
+    from detail_page_ai.models import GeneratedImage, GeneratedSection, ProductPhoto, ProductPhotoSet
+
+    image = png()
+
+    def photo(photo_id):
+        return ProductPhoto(
+            photo_id=photo_id, order=1, label=photo_id, data=image, mime_type="image/png",
+            asset_mode="source_original" if photo_id == "hero" else "source",
+            source_sha256=hashlib.sha256(image).hexdigest(), product_generated=False, fidelity_status="VERIFIED",
+        )
+
+    class Photos:
+        def generate(self, **kwargs):
+            return ProductPhotoSet(photos=(photo("hero"), photo("packshot")))
+
+    class Renderer:
+        def render(self, **kwargs):
+            sections = tuple(
+                GeneratedSection(section_id=name, order=i, label=name, data=image, mime_type="image/png")
+                for i, name in enumerate(["hero", "statement"], start=1)
+            )
+            return GeneratedImage(data=image, mime_type="image/png", photos=kwargs["photo_set"].photos, sections=sections)
+
+    row = render_conversation(gold(), HINTS, image, "image/png", photo_generator=Photos(), renderer=Renderer(), judge=FakeJudge(problem_on_call=3))
+
+    assert tool_names(row["messages"]) == [
+        "prepare_photos", "verify_photos", "inspect_image", "inspect_image",
+        "render_page", "inspect_render", "inspect_render", "finish",
+    ]
+    tool_results = [m["content"] for m in row["messages"] if m["role"] == "tool"]
+    assert "없는 photo_id" in tool_results[2] and "packshot" in tool_results[2]
+    finish = row["messages"][-1]["tool_calls"][0]["function"]["arguments"]
+    assert finish["warnings"] == ["statement: 글자 넘침이 보입니다."]
+    assert "섹션 2개" in finish["summary"]
+
+
+def test_judge_answers_that_misquote_the_product_text_are_rejected():
+    from detail_page_ai.finetune.export import judged_ok
+
+    reply = {"answer": "'도리지꽃 호롱' 텍스트는 정상입니다.", "has_problem": False}
+    assert not judged_ok([{"reply": reply}], "도라지꽃 호롱")
+    assert judged_ok([{"reply": {**reply, "answer": "'도라지꽃 호롱' 텍스트는 정상입니다."}}], "도라지꽃 호롱")
+    assert not judged_ok([{"reply": {"answer": " ", "has_problem": False}}])
+
+
+def test_products_by_the_same_artist_share_a_group():
+    products = {"1": {}, "2": {}, "3": {}, "4": {}}
+
+    groups = group_products(products, brands={"1": "김작가", "2": "김작가", "3": "", "4": ""})
+
+    assert groups["1"] == groups["2"]
+    assert len({groups["1"], groups["3"], groups["4"]}) == 3
