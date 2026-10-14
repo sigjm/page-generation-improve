@@ -1,10 +1,14 @@
 """Tools the agent can call, grouped by mode. Each wraps existing pipeline code."""
 
+import io
+from dataclasses import replace
 from typing import Any, Callable, Literal
 
+from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..dto import LayoutId, ProductProfileDto, UserHintsDto
+from ..models import GeneratedImage, PhotoGenerationFailure, ProductPhoto, ProductPhotoSet
 from ..validation import ensure_editorial_page_plan, sanitize_page_plan
 from . import prompts
 from .loop import AgentState, Tool
@@ -211,3 +215,169 @@ def draft_tools(
         Tool("plan_page", "레이아웃과 블록 구성을 확정한다.", PlanPageArgs, plan_page, status=("EXTRACTING", 40)),
         Tool("finish", "초안 작업을 끝낸다.", DraftFinishArgs, finish),
     )
+
+
+GENERATED_MODES = {"generated_scene", "generated_view"}
+
+
+class InspectImageArgs(_Args):
+    photo_id: str = Field(min_length=1, max_length=80)
+    question: str = Field(min_length=1, max_length=300)
+
+
+class RegeneratePhotoArgs(_Args):
+    photo_id: str = Field(min_length=1, max_length=80)
+    direction: str = Field(min_length=1, max_length=200)
+
+
+class InspectRenderArgs(_Args):
+    section_index: int = Field(ge=0)
+    question: str = Field(
+        default="글자 넘침, 빈 영역, 깨진 이미지가 있는가?", max_length=300
+    )
+
+
+class RenderFinishArgs(_Args):
+    summary: str = Field(default="", max_length=1000)
+    warnings: list[str] = Field(default_factory=list, max_length=12)
+
+
+class _ImageReview(BaseModel):
+    answer: str = Field(min_length=1, max_length=500)
+    has_problem: bool
+
+
+def photo_summary(photo_set: ProductPhotoSet) -> dict[str, Any]:
+    return {
+        "photos": [
+            {
+                "photo_id": photo.photo_id,
+                "asset_mode": photo.asset_mode,
+                "fidelity_status": photo.fidelity_status,
+                "product_generated": photo.product_generated,
+            }
+            for photo in photo_set.photos
+        ],
+        "failures": [
+            {"photo_id": failure.photo_id, "reason": failure.reason[:200]}
+            for failure in photo_set.photo_generation_failures
+        ],
+    }
+
+
+def _downscaled_png(data: bytes, longest: int = 1024) -> bytes:
+    image = Image.open(io.BytesIO(data)).convert("RGB")
+    image.thumbnail((longest, longest))
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+def render_tools(
+    *,
+    generate_photos: Callable[[], ProductPhotoSet],
+    validate: Callable[[ProductPhotoSet], ProductPhotoSet],
+    photo_status: Callable[[ProductPhoto], str],
+    render: Callable[[ProductPhotoSet], GeneratedImage],
+    regenerate: Callable[
+        [ProductPhoto, str], tuple[ProductPhoto | None, tuple[PhotoGenerationFailure, ...]]
+    ]
+    | None,
+    chat_client,
+) -> dict[str, Tool]:
+    """No tool here takes copy or layout: the approved draft cannot change."""
+
+    def require_photos(state: AgentState) -> ProductPhotoSet:
+        if state.photo_set is None:
+            raise ValueError("prepare_photos를 먼저 호출하세요")
+        return state.photo_set
+
+    def find(state: AgentState, photo_id: str) -> ProductPhoto:
+        for photo in require_photos(state).photos:
+            if photo.photo_id == photo_id:
+                return photo
+        raise ValueError(f"없는 photo_id입니다: {photo_id}")
+
+    def review(image: bytes, question: str) -> dict[str, Any]:
+        return _ImageReview.model_validate(
+            chat_client.generate_json(
+                prompts.image_review_prompt(question),
+                image=_downscaled_png(image),
+                mime_type="image/png",
+            )
+        ).model_dump()
+
+    def prepare_photos(state: AgentState, args: NoArgs) -> dict[str, Any]:
+        state.photo_set = generate_photos()
+        return photo_summary(state.photo_set)
+
+    def verify_photos(state: AgentState, args: NoArgs) -> dict[str, Any]:
+        photo_set = require_photos(state)
+        statuses = [
+            {"photo_id": photo.photo_id, "status": photo_status(photo)}
+            for photo in photo_set.photos
+        ]
+        state.photo_set = validate(photo_set)
+        return {
+            "photos": statuses,
+            "removed": [item["photo_id"] for item in statuses if item["status"] == "REJECTED"],
+        }
+
+    def inspect_image(state: AgentState, args: InspectImageArgs) -> dict[str, Any]:
+        return review(find(state, args.photo_id).data, args.question)
+
+    def regenerate_photo(state: AgentState, args: RegeneratePhotoArgs) -> dict[str, Any]:
+        photo = find(state, args.photo_id)
+        if photo.asset_mode not in GENERATED_MODES:
+            raise ValueError("원본을 보존한 사진은 다시 만들 수 없습니다")
+        new_photo, failures = regenerate(photo, args.direction)
+        if new_photo is None:
+            return {"regenerated": False, "failures": [failure.reason[:200] for failure in failures]}
+        state.photo_set = replace(
+            state.photo_set,
+            photos=tuple(
+                new_photo if item.photo_id == photo.photo_id else item
+                for item in state.photo_set.photos
+            ),
+        )
+        return {"regenerated": True, "photo_id": new_photo.photo_id}
+
+    def render_page(state: AgentState, args: NoArgs) -> dict[str, Any]:
+        photo_set = validate(require_photos(state))
+        state.photo_set = photo_set
+        state.generated_image = render(photo_set)
+        state.rendered_photo_set = photo_set
+        return {
+            "sections": [
+                {"index": index, "section_id": section.section_id, "label": section.label}
+                for index, section in enumerate(state.generated_image.sections)
+            ]
+        }
+
+    def inspect_render(state: AgentState, args: InspectRenderArgs) -> dict[str, Any]:
+        if state.generated_image is None:
+            raise ValueError("render_page를 먼저 호출하세요")
+        sections = state.generated_image.sections
+        if args.section_index >= len(sections):
+            raise ValueError(f"섹션은 {len(sections)}개입니다")
+        section = sections[args.section_index]
+        return {"section_id": section.section_id, **review(section.data, args.question)}
+
+    def finish(state: AgentState, args: RenderFinishArgs) -> dict[str, Any]:
+        state.summary = args.summary
+        state.warnings.extend(args.warnings)
+        return {"ok": True}
+
+    tools = [
+        Tool("prepare_photos", "원본 보존 사진과 AI 보조 사진을 준비한다.", NoArgs, prepare_photos, status=("GENERATING_BACKGROUNDS", 45)),
+        Tool("verify_photos", "사진마다 원본 보존 검증 결과를 보여주고 통과하지 못한 사진을 뺀다.", NoArgs, verify_photos, status=("VERIFYING", 65)),
+        Tool("inspect_image", "사진 한 장을 눈으로 검수한다.", InspectImageArgs, inspect_image, status=("VERIFYING", 65)),
+        Tool("render_page", "페이지를 PNG로 렌더한다.", NoArgs, render_page, status=("RENDERING", 75), max_calls=2),
+        Tool("inspect_render", "렌더된 섹션 하나를 검수한다.", InspectRenderArgs, inspect_render, status=("RENDERING", 80), max_calls=2),
+        Tool("finish", "렌더 작업을 끝낸다. 고치지 못한 문제는 warnings에 적는다.", RenderFinishArgs, finish),
+    ]
+    if regenerate is not None:
+        tools.append(
+            Tool("regenerate_photo", "AI 생성 사진 한 장을 다른 방향으로 다시 만든다.", RegeneratePhotoArgs, regenerate_photo, status=("GENERATING_BACKGROUNDS", 50), max_calls=3)
+        )
+    return _registry(*tools)

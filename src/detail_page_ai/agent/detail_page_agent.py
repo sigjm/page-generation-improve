@@ -5,11 +5,12 @@ from dataclasses import asdict
 from typing import Any, Callable
 
 from ..dto import ProductProfileDto, UserHintsDto
+from ..models import GeneratedImage, GenerationOptions, ProductPhotoSet
 from ..pipeline import DetailPagePipeline
 from ..validation import ensure_editorial_page_plan
 from . import prompts
 from .loop import FALLBACKS, AgentState, LoopOutcome, Tool, run_agent_loop
-from .tools import draft_tools
+from .tools import draft_tools, render_tools
 
 logger = logging.getLogger(__name__)
 
@@ -86,3 +87,77 @@ class DetailPageAgent(DetailPagePipeline):
             FALLBACKS.labels("draft", "incomplete").inc()
         profile = state.profile or self._analyze(source_image, source_mime_type, user_hints)
         return profile if state.plan_ready else ensure_editorial_page_plan(profile)
+
+    def _produce_page(
+        self,
+        *,
+        source_image: bytes,
+        source_mime_type: str,
+        additional_source_images: tuple[tuple[bytes, str], ...],
+        profile: ProductProfileDto,
+        options: GenerationOptions,
+        status_callback: Callable[[str, int], None],
+    ) -> tuple[ProductPhotoSet, GeneratedImage]:
+        source_images = ((source_image, source_mime_type),) + additional_source_images
+
+        def generate_photos() -> ProductPhotoSet:
+            return self._generate_photos(
+                source_image=source_image,
+                source_mime_type=source_mime_type,
+                additional_source_images=additional_source_images,
+                profile=profile,
+                options=options,
+            )
+
+        def validate(photo_set: ProductPhotoSet) -> ProductPhotoSet:
+            return self._validated_photo_set(photo_set, source_images)
+
+        def render(photo_set: ProductPhotoSet) -> GeneratedImage:
+            return self._render_page(
+                source_image=source_image,
+                source_mime_type=source_mime_type,
+                profile=profile,
+                options=options,
+                photo_set=photo_set,
+            )
+
+        def regenerate(photo, direction):
+            return self.photo_generator.regenerate_role(
+                photo=photo,
+                source_image=source_image,
+                source_mime_type=source_mime_type,
+                profile=profile,
+                direction=direction,
+            )
+
+        state = AgentState(mode="render", source_images=source_images, profile=profile)
+        outcome = self._run_loop(
+            state,
+            render_tools(
+                generate_photos=generate_photos,
+                validate=validate,
+                photo_status=lambda photo: self.photo_validator.validate(
+                    photo, source_images=source_images
+                ),
+                render=render,
+                regenerate=(
+                    regenerate if hasattr(self.photo_generator, "regenerate_role") else None
+                ),
+                chat_client=self.chat_client,
+            ),
+            prompts.RENDER_SYSTEM_PROMPT,
+            prompts.render_user_prompt(profile, len(source_images)),
+            status_callback,
+        )
+        # Always re-validate here: the agent may have skipped verify_photos.
+        photo_set = validate(
+            state.photo_set if state.photo_set is not None else generate_photos()
+        )
+        generated_image = state.generated_image
+        if generated_image is None or state.rendered_photo_set != photo_set:
+            if outcome.finished:
+                FALLBACKS.labels("render", "incomplete").inc()
+            generated_image = render(photo_set)
+        if state.warnings:
+            logger.warning("agent render warnings: %s", state.warnings)
+        return photo_set, generated_image

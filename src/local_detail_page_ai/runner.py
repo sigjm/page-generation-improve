@@ -74,11 +74,15 @@ class MlxServeUsageSceneGenerator:
         source_mime_type: str,
         width: int,
         height: int,
+        direction: str | None = None,
     ) -> bytes:
         if role != "lifestyle":
             raise ValueError("generated usage scenes are restricted to lifestyle")
+        prompt = build_generated_usage_scene_prompt(profile)
+        if direction:
+            prompt += f"\nArt direction (keep the exact product unchanged): {direction}"
         return self.image_client.edit(
-            build_generated_usage_scene_prompt(profile),
+            prompt,
             source_image=source_image,
             source_mime_type=source_mime_type,
             width=width,
@@ -102,13 +106,17 @@ class MlxServeDetailViewGenerator:
         source_mime_type: str,
         width: int,
         height: int,
+        direction: str | None = None,
     ) -> bytes:
         if role not in {"detail-02", "detail-03", "detail-04", "detail-05"}:
             raise ValueError(
                 "generated detail cuts are restricted to detail-02 through detail-05"
             )
+        prompt = build_generated_detail_cut_prompt(profile, role)
+        if direction:
+            prompt += f"\nArt direction (keep the exact product unchanged): {direction}"
         return self.image_client.edit(
-            build_generated_detail_cut_prompt(profile, role),
+            prompt,
             source_image=source_image,
             source_mime_type=source_mime_type,
             width=width,

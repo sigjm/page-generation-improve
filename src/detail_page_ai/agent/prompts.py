@@ -19,6 +19,16 @@ DRAFT_SYSTEM_PROMPT = f"""너는 한국 공예품 상세페이지의 초안을 �
 - plan_page로 페이지 구성을 확정한다.
 - finish를 호출한다."""
 
+RENDER_SYSTEM_PROMPT = f"""너는 장인이 승인한 상세페이지 초안으로 최종 이미지를 만드는 에이전트다.
+{PRINCIPLES}
+승인된 문구와 레이아웃은 바꿀 수 없다. 사진과 렌더 품질만 다룬다.
+권장 순서:
+- prepare_photos로 사진을 준비하고 verify_photos로 검증한다.
+- asset_mode가 generated_scene 또는 generated_view인 AI 사진은 inspect_image로 확인하고, 문제가 있을 때만 regenerate_photo로 다시 만든다.
+- render_page로 렌더하고, 필요하면 inspect_render로 섹션을 확인한다.
+- AI 사진 때문에 생긴 문제는 고친 뒤 render_page를 다시 호출한다. 문구나 레이아웃 때문에 생긴 문제는 고치지 말고 finish의 warnings에 적는다.
+- finish를 호출한다."""
+
 
 def creator_data_block(user_hints: UserHintsDto | None) -> str:
     data = user_hints.model_dump(exclude_none=True) if user_hints else {}
@@ -63,4 +73,22 @@ def revise_copy_prompt(
         'JSON으로만 답하라: {"items": [{"target": "items의 target", '
         '"title": "80자 이내", "description": "300자 이내", '
         '"evidence": "image-visible" 또는 "inferred"}]}'
+    )
+
+
+def render_user_prompt(profile: ProductProfileDto, photo_count: int) -> str:
+    blocks = ", ".join(f"{block.section_id}({block.block_type})" for block in profile.page_plan)
+    return (
+        f"원본 사진 {photo_count}장. 제품: {profile.display_name or profile.product_type}. "
+        f"공예 종류: {profile.craft_type or '미상'}.\n"
+        f"레이아웃: {profile.layout_id}. 블록: {blocks or '기본 구성'}."
+    )
+
+
+def image_review_prompt(question: str) -> str:
+    return (
+        "상품 상세페이지에 쓸 이미지를 검수하라. 제품 형태 왜곡, 잘린 제품, 깨진 글자, "
+        "빈 영역, 제품과 맞지 않는 배경이 있으면 문제로 본다.\n"
+        f"<question>\n{question}\n</question>\n"
+        'JSON으로만 답하라: {"answer": "한국어 답(300자 이내)", "has_problem": true 또는 false}'
     )
