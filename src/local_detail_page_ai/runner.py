@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from detail_page_ai.agent.detail_page_agent import DetailPageAgent
 from detail_page_ai.dto import AiBePersistAck, GenerationMetadataDto, GenerationOptions
 from detail_page_ai.html_renderer import HtmlDetailPageRenderer
 from detail_page_ai.pipeline import DetailPagePipeline, PipelineResult
@@ -136,6 +137,7 @@ def build_local_pipeline(
     image_url: str = "http://127.0.0.1:11234",
     image_model: str = "mlx-community/flux2-klein-9b-4bit",
     image_timeout: float = 300.0,
+    agent_mode: str = "pipeline",
 ) -> DetailPagePipeline:
     if text_provider == "mlx":
         chat_client = MlxServeChatClient(
@@ -168,7 +170,7 @@ def build_local_pipeline(
     else:
         raise ValueError("image_provider must be 'none' or 'mlx'")
 
-    return DetailPagePipeline(
+    pipeline_kwargs = dict(
         analyzer=LocalProductAnalyzer(
             chat_client=chat_client,
             image_generation_enabled=(
@@ -202,6 +204,11 @@ def build_local_pipeline(
             ),
         ),
     )
+    if agent_mode == "agent":
+        if not hasattr(chat_client, "chat_with_tools"):
+            raise ValueError("agent_mode='agent' needs text_provider='mlx'")
+        return DetailPageAgent(chat_client=chat_client, **pipeline_kwargs)
+    return DetailPagePipeline(**pipeline_kwargs)
 
 
 def save_pipeline_result(result: PipelineResult, output_dir: str | Path) -> Path:
@@ -271,3 +278,14 @@ def save_pipeline_result(result: PipelineResult, output_dir: str | Path) -> Path
         encoding="utf-8",
     )
     return output
+
+
+def save_agent_trace(pipeline: DetailPagePipeline, output_dir: str | Path) -> Path | None:
+    """Write the agent's per-mode tool trace for evaluation; no-op for the fixed pipeline."""
+    last_runs = getattr(pipeline, "last_runs", None)
+    if not last_runs:
+        return None
+    path = Path(output_dir) / "agent_trace.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(last_runs, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path

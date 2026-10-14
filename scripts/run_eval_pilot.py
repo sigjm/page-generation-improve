@@ -24,7 +24,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from detail_page_ai.dto import GenerationOptions, UserHintsDto
-from local_detail_page_ai.runner import build_local_pipeline, save_pipeline_result
+from local_detail_page_ai.runner import (
+    build_local_pipeline,
+    save_agent_trace,
+    save_pipeline_result,
+)
 
 DEFAULT_CATEGORIES = [
     "textile",
@@ -267,6 +271,7 @@ def run_pilot(args: argparse.Namespace) -> int:
         args=args,
     )
 
+    agent_mode = getattr(args, "agent_mode", "pipeline")
     pipeline = build_local_pipeline(
         text_url=args.text_url,
         text_model=args.text_model,
@@ -277,6 +282,7 @@ def run_pilot(args: argparse.Namespace) -> int:
         image_url=args.image_url,
         image_model=args.image_model,
         image_timeout=args.image_timeout,
+        agent_mode=agent_mode,
     )
 
     print(f"Starting {'full' if all_cases else 'pilot'} evaluation run: {len(selected_cases)} cases")
@@ -392,6 +398,13 @@ def run_pilot(args: argparse.Namespace) -> int:
             )
 
             saved_path = save_pipeline_result(result, case_output_dir)
+            record["agent_mode"] = agent_mode
+            if agent_mode == "agent":
+                save_agent_trace(pipeline, case_output_dir)
+                record["agent_runs"] = {
+                    mode: {"reason": run["reason"], "tool_calls": len(run["trace"])}
+                    for mode, run in pipeline.last_runs.items()
+                }
             record["idempotency_key"] = meta.get("idempotency_key")
             record["success"] = True
             record["output_dir"] = str(saved_path)
@@ -495,6 +508,12 @@ def main() -> None:
         type=float,
         default=300.0,
         help="Text model timeout in seconds (default: 300.0)",
+    )
+    parser.add_argument(
+        "--agent-mode",
+        choices=("pipeline", "agent"),
+        default="pipeline",
+        help="Run the fixed pipeline or the tool-calling agent (records agent_trace.json per case).",
     )
     parser.add_argument(
         "--text-provider",

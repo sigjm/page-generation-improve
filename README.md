@@ -106,6 +106,21 @@ BE → AI  승인된 draft + 원본 사진
 - 장인이 문구만 고쳐 저장할 때(`PUT …/draft`)는 모델 호출도, PNG 생성도 하지 않습니다.
 - 생성 작업은 **한 번에 하나씩** 처리합니다. 동시에 들어온 작업은 대기하며, 1초 이상 기다리면 로그에 남깁니다(`job … waited …s for the previous job`).
 
+### 에이전트 모드 (`AGENT_MODE=agent`, 기본값)
+
+위 단계를 고정 순서로 돌리는 대신, Qwen이 도구를 골라 씁니다. 상태값과 BE 계약은 같습니다.
+
+| 모드 | 도구 | 바꿀 수 없는 것 |
+|---|---|---|
+| 초안 | `analyze_photos`, `inspect_photo`, `check_copy_grounding`, `revise_copy`, `plan_page` | — |
+| 렌더 | `prepare_photos`, `verify_photos`, `inspect_image`, `regenerate_photo`, `render_page`, `inspect_render` | 승인된 문구와 레이아웃, 원본 보존 사진 |
+| 편집 | `update_copy`, `update_block`, `move_block`, `remove_block`, `add_block`, `set_layout`, `inspect_photo` | 근거 없는 추정 문구(`inferred`), `hero`·`closing` 블록 |
+
+- 루프가 끝나면 문구 정리(`sanitize_profile_for_render`)와 원본 보존 검증이 **항상** 다시 실행됩니다.
+- 도구 호출 예산(`AGENT_MAX_TOOL_CALLS`)이나 제한 시간을 넘기면, 빠진 단계만 기존 순서로 채웁니다. `/metrics`의 `agent_fallback_total`로 폴백 횟수를 봅니다.
+- 텍스트 서버가 tool calling을 지원하지 않으면 `AGENT_MODE=pipeline`으로 둡니다. 확인 방법은 [`agent-tool-calling-smoke.md`](docs/internal/agent-tool-calling-smoke.md)입니다.
+- 설계: [`2026-10-14-single-agent-design.md`](docs/superpowers/specs/2026-10-14-single-agent-design.md)
+
 <br>
 
 <a id="photos"></a>
@@ -224,6 +239,7 @@ FE가 **자체 컴포넌트 허용 목록으로만** 그리는 제한형 JSON �
 | `POST` | `/internal/v1/ai/detail-page-jobs` | 생성 작업 접수. `202` + `job_id`, `status_url` |
 | `GET` | `/internal/v1/ai/detail-page-jobs/{job_id}` | 상태 · 진행률 · 초안 · 결과 조회 |
 | `PUT` | `/internal/v1/ai/detail-page-jobs/{job_id}/draft` | 장인이 고친 초안 저장 (모델 · PNG 호출 없음) |
+| `POST` | `/internal/v1/ai/detail-page-jobs/{job_id}/draft/edits` | 장인의 자연어 지시로 초안 수정 (`AGENT_MODE=agent`). 바뀐 것이 있을 때만 버전이 오름 |
 | `POST` | `/internal/v1/ai/detail-page-renders` | 승인된 초안으로 최종 사진 · PNG 생성, BE로 콜백 |
 | `GET` | `/health` | 생존 확인. 인증 없이 `200` |
 | `GET` | `/health/ready` | 준비 확인. 텍스트 · 이미지 모델 서버까지 확인해 `200` 또는 `503` |
@@ -438,6 +454,8 @@ npm run render:detail-page -- \
 | `DETAIL_PAGE_RENDERER` | `html` | PNG 렌더러 |
 | `PROMPT_VERSION` | — | 프롬프트 버전 표시 |
 | `REMBG_USE_CUDA` | 꺼짐 | `1`이면 누끼를 GPU에서 실행 |
+| `AGENT_MODE` | `agent` | `agent`면 Qwen이 도구를 골라 실행, `pipeline`이면 기존 고정 순서 |
+| `AGENT_MAX_TOOL_CALLS` / `AGENT_TIMEOUT_SECONDS` | `15` / `600` | 에이전트 한 번 실행의 도구 호출 상한 · 제한 시간 |
 
 ### BE 연동과 한도
 
@@ -491,7 +509,7 @@ uv run pytest -q
 .venv/bin/python -m pytest -q
 ```
 
-**536개 테스트**가 외부 모델 호출 없이 통과합니다(2026-10-05). 검증 범위는 다음과 같습니다.
+**603개 테스트**가 외부 모델 호출 없이 통과합니다(2026-10-14). 검증 범위는 다음과 같습니다.
 
 - 요청 · 응답 DTO와 API 인증 · 오류 코드
 - 작업 상태 전이, SQLite lease 점유 · 재시작 복구, outbox 선저장 · 멱등 재전송 · 별칭 보존
@@ -499,6 +517,7 @@ uv run pytest -q
 - 근거 없는 문구 제외와 '확인 필요' 판정
 - `react_document` 스키마 · 안전성 · camelCase 직렬화 · 섹션 색
 - 모델 서버 기동 스크립트(옵션, 모델 종료 시 API 종료)
+- 에이전트 루프의 예산 · 폴백, 모드별 도구 제한, 대화형 편집에서 근거 없는 문구 차단
 
 ### 평가 파이프라인
 
@@ -527,6 +546,7 @@ page_generation/
 │   ├── app.py                     # FastAPI 앱 · 내부 API · 헬스 · /metrics
 │   ├── service.py                 # 작업 접수 · 상태 · 승인 처리
 │   ├── pipeline.py                # 분석 → 사진 → 합성 → 검증 → 렌더 (작업 한 번에 하나)
+│   ├── agent/                     # 단일 에이전트: 루프 · 모드별 도구 · 프롬프트 (AGENT_MODE=agent)
 │   ├── prompts.py                 # 분석 · 카피 · 연출 프롬프트
 │   ├── validation.py              # 입력 사진 · 프로필 검증, 근거 없는 문구 제외
 │   ├── source_photos.py           # 누끼 · crop · 합성 · 픽셀 보존 검증 · 캐시
