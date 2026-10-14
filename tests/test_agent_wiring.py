@@ -87,3 +87,24 @@ def test_agent_mode_requires_a_tool_calling_text_server(tmp_path):
         factory_module.build_service(
             settings(tmp_path, agent_mode="agent", local_text_provider="ollama")
         )
+
+
+def test_image_steps_reach_the_image_client(monkeypatch, tmp_path):
+    # Qwen-Image 2.1 needs ~20 steps; FLUX.2 klein is distilled to 4.
+    monkeypatch.setenv("LOCAL_IMAGE_STEPS", "20")
+    assert Settings(_env_file=None).local_image_steps == 20
+    monkeypatch.delenv("LOCAL_IMAGE_STEPS")
+    assert Settings(_env_file=None).local_image_steps == 4
+
+    seen = {}
+
+    class Recorder:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(factory_module, "MlxServeImageClient", Recorder)
+    factory_module.build_service(settings(
+        tmp_path, local_text_provider="mlx", local_image_provider="mlx", background_provider="mlx", local_image_steps=20,
+    ))
+
+    assert seen["steps"] == 20

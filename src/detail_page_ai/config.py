@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     local_image_timeout_seconds: float = Field(
         default=300.0, alias="LOCAL_IMAGE_TIMEOUT", gt=0
     )
+    # FLUX.2 klein is distilled to 4 steps; Qwen-Image 2.1 needs about 20.
+    local_image_steps: int = Field(default=4, alias="LOCAL_IMAGE_STEPS", ge=1, le=100)
     product_photo_generation: Literal["source"] = Field(
         default="source", alias="PRODUCT_PHOTO_GENERATION"
     )
