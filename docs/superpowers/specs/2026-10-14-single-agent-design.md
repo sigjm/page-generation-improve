@@ -42,9 +42,9 @@ BE ─▶ FastAPI(app.py) ─▶ DetailPageJobService(service.py)        ← 변
                                 │
                                 ▼
                      DetailPageAgent(DetailPagePipeline 상속)
-                     ├─ create_draft()   mode="draft"
-                     ├─ run()            mode="render"   (profile_override가 있을 때)
-                     └─ edit_draft()     mode="edit"     (신규)
+                     ├─ _compose_profile()  mode="draft"   (create_draft, run이 부르는 훅)
+                     ├─ _produce_page()     mode="render"  (run이 부르는 훅)
+                     └─ edit_draft()        mode="edit"    (신규)
                                 │
                      ┌──────────┴───────────┐
                      ▼                      ▼
@@ -62,10 +62,14 @@ BE ─▶ FastAPI(app.py) ─▶ DetailPageJobService(service.py)        ← 변
 |---|---|
 | `src/detail_page_ai/agent/loop.py` | `AgentState`, `run_agent_loop()`, 예산, 폴백 신호 |
 | `src/detail_page_ai/agent/tools.py` | 도구 정의(이름, 설명, Pydantic 인자 모델, 실행 함수)와 모드별 레지스트리 |
-| `src/detail_page_ai/agent/detail_page_agent.py` | `DetailPageAgent`: `create_draft`, `run`, `edit_draft` 재정의와 폴백 연결 |
+| `src/detail_page_ai/agent/prompts.py` | 모드별 시스템 프롬프트와 검수·재작성 프롬프트 |
+| `src/detail_page_ai/agent/detail_page_agent.py` | `DetailPageAgent`: `_compose_profile`, `_produce_page` 훅 재정의, `edit_draft`, 폴백 연결 |
+| `src/detail_page_ai/pipeline.py` (수정) | `create_draft`와 `run`의 단계 실행을 `_compose_profile`, `_produce_page` 훅으로 분리. 동작은 그대로 |
 | `src/local_detail_page_ai/clients.py` (수정) | `MlxServeChatClient.chat_with_tools(messages, tools)` 추가 |
 | `src/local_detail_page_ai/factory.py` (수정) | `AGENT_MODE`에 따라 `DetailPageAgent` 또는 `DetailPagePipeline` 생성 |
 | `src/detail_page_ai/source_photos.py` (수정) | 생성 컷 역할 하나만 다시 만드는 `regenerate_role()` 추가 |
+| `src/local_detail_page_ai/runner.py` (수정) | 생성기에 `direction` 인자 추가, `build_local_pipeline(agent_mode=...)` |
+| `scripts/run_eval_pilot.py` (수정) | `--agent-mode`, 사례별 `agent_trace.json` 저장 |
 | `src/detail_page_ai/service.py`, `app.py` (수정) | 편집 엔드포인트와 `edit_draft` 서비스 메서드 추가. `_run_job`이 `create_draft`에 `additional_source_images`도 넘기게 수정 (지금은 대표 사진만 넘김) |
 | `deploy/sglang/entrypoint.sh` (수정) | 텍스트 서버에 `--tool-call-parser` 추가 |
 
@@ -88,7 +92,7 @@ BE ─▶ FastAPI(app.py) ─▶ DetailPageJobService(service.py)        ← 변
 
 | 상태값 | 도구 |
 |---|---|
-| `ANALYZING` | `analyze_photos`, `inspect_photo`, `check_copy_grounding`, `revise_copy` |
+| `ANALYZING` | `analyze_photos`, `inspect_photo`, `revise_copy` (`check_copy_grounding`은 모델 호출이 없어 상태를 바꾸지 않음) |
 | `EXTRACTING` | `plan_page` |
 | `GENERATING_BACKGROUNDS` | `prepare_photos`, `regenerate_photo` |
 | `VERIFYING` | `verify_photos`, `inspect_image` |
@@ -135,19 +139,19 @@ BE ─▶ FastAPI(app.py) ─▶ DetailPageJobService(service.py)        ← 변
 | `prepare_photos` | `SourcePreservingProductPhotoGenerator.generate` | 누끼, 역할 배정, FLUX 보조 컷 생성 |
 | `verify_photos` | `ProductFidelityValidator.validate` + 누끼 게이트 결과 | 사진별 상태와 이유 |
 | `inspect_image(photo_id, question)` | Qwen VLM (신규) | 생성 컷의 제품 왜곡, 공예 종류와 맞지 않는 배경 확인 |
-| `regenerate_photo(photo_id, direction)` | `SourcePreservingProductPhotoGenerator.regenerate_role` (신규) | `lifestyle-02`, `detail-02`~`detail-05` 같은 생성 컷만 재생성. `direction`은 장면 프롬프트에 덧붙는 짧은 지시(최대 200자) |
+| `regenerate_photo(photo_id, direction)` | `SourcePreservingProductPhotoGenerator.regenerate_role` (신규) | `asset_mode`가 `generated_scene`/`generated_view`인 사진만 같은 자리에서 재생성. `direction`은 생성 프롬프트에 덧붙는 짧은 지시(최대 200자). 최대 3회 |
 | `render_page` | `HtmlDetailPageRenderer.render` | HTML 조립 후 Playwright로 PNG |
 | `inspect_render(section_index)` | Qwen VLM (신규) | 섹션 PNG(긴 변 1024px로 축소)에서 글자 넘침, 빈 섹션, 깨진 이미지 확인 |
 | `finish(summary, warnings)` | — | 종료. 고치지 못한 문제는 `warnings`로 남김 |
 
-`profile_override` 없이 `run`이 호출되는 경우(로컬 데모 API, `ENABLE_LEGACY_DEMO_API`)는 기존 `DetailPagePipeline.run`을 그대로 쓴다.
+`profile_override` 없이 `run`이 호출되는 경우(로컬 데모 API, 평가 스크립트)는 `_compose_profile`과 `_produce_page`를 차례로 부르므로 초안 모드와 렌더 모드가 이어서 돈다.
 
 ### 4.3 자기교정 범위
 
 | 감지 | 교정 | 상한 |
 |---|---|---|
 | 근거 부족으로 빠질 문구가 있음 | `revise_copy` 후 `check_copy_grounding`으로 재확인 | 2회. 그래도 남으면 기존처럼 제외하고 '확인 필요'에 기록 |
-| 생성 컷이 어색함 | 방향을 바꿔 `regenerate_photo` | `MAX_GENERATED_PHOTOS` 예산 안에서 |
+| 생성 컷이 어색함 | 방향을 바꿔 `regenerate_photo` | 3회. 같은 자리를 바꾸기만 하므로 생성 컷 수는 늘지 않음 |
 | 생성 컷 때문에 생긴 렌더 결함 | 해당 컷 재생성 후 `render_page` | `render_page` 2회 |
 | 문구나 레이아웃 때문에 생긴 렌더 결함 | 고치지 않고 `warnings`로 보고 | 승인된 내용이므로 |
 | 누끼 실패 (`FALLBACK`) | 재시도하지 않음 | rembg는 결정적이라 다시 돌려도 결과가 같음 |
@@ -159,24 +163,27 @@ BE ─▶ FastAPI(app.py) ─▶ DetailPageJobService(service.py)        ← 변
 ```text
 POST /internal/v1/ai/detail-page-jobs/{job_id}/draft/edits
 헤더  X-AI-Internal-Token
-요청  { "instruction": str (1~1000자), "expected_version": int }
+요청  { "instruction": str (1~1000자), "version": int }      ← PUT …/draft와 같은 이름
 응답  200 {
         "draft": AiFeDraftResultDto,       // PUT …/draft 응답과 같은 형태
         "reply": str,                       // 장인에게 보여줄 한국어 답변
-        "changes": [{ "section_id": str, "field": str, "before": str|null, "after": str|null }],
+        "changes": [{ "target": str, "before": str|null, "after": str|null, "evidence": str|null }],
         "warnings": [str]
       }
 ```
 
 | 코드 | 뜻 |
 |---|---|
-| `400` | 지시가 비었거나 너무 김, 초안이 아직 준비되지 않음 |
+| `400` | `AGENT_MODE=pipeline`이라 대화형 편집이 꺼져 있음 |
 | `401` | 내부 토큰 불일치 |
-| `409` | `expected_version` 충돌, 승인 중이거나 완료된 초안 (기존 `save_draft`와 같은 판정) |
+| `404` | 작업이 없음 |
+| `409` | `version` 충돌, 초안이 아직 없음, 승인 중이거나 완료된 초안 (기존 `PUT …/draft`와 같은 판정) |
+| `422` | 요청 본문 검증 실패 (지시가 비었거나 1000자 초과). FastAPI 기본 동작 |
 | `503` | GPU 잠금을 10초 안에 얻지 못함 (재시도 가능), 모델 서버를 쓸 수 없음 |
 
 - 응답은 동기로 보낸다. 텍스트 전용 Qwen 호출 몇 번이면 끝난다.
 - 결과 저장은 기존 `DetailPageJobService.save_draft(expected_version=...)`를 그대로 쓴다. 그래서 `build_editable_draft`와 sanitize를 거친다.
+- 실제로 바뀐 것이 없으면 저장하지 않으므로 `version`도 오르지 않는다.
 - 대화 기록은 남기지 않는다. 요청마다 "현재 초안 + 지시 한 줄"로 처리한다. 되돌리기는 FE가 이전 버전을 `PUT …/draft`로 다시 저장하면 된다.
 - 편집 후 PNG는 만들지 않는다. FE는 `react_document`로 그린다.
 
@@ -184,13 +191,14 @@ POST /internal/v1/ai/detail-page-jobs/{job_id}/draft/edits
 
 | 도구 | 하는 일 |
 |---|---|
-| `update_copy(section_id, title?, description?, evidence)` | 문구 수정. `evidence` 필수 |
+| `update_copy(path, text, evidence)` | 문구 수정. `path`는 `product_name`, `summary`, `hero_headline`, `hero_description`, `usage_scene`, `blocks.<section_id>.<eyebrow\|title\|body>` 중 하나. `evidence` 필수 |
 | `update_block(section_id, variant)` | 블록 변형 변경 (기존 허용 목록 8종) |
-| `move_block(section_id, position)` / `remove_block(section_id)` / `add_block(block_type, after_section_id)` | 블록 순서 변경, 삭제, 추가 (기존 허용 목록 13종) |
+| `move_block(section_id, position)` / `remove_block(section_id)` / `add_block(block_type, after_section_id, title, body, evidence)` | 블록 순서 변경, 삭제, 추가 (기존 허용 목록 13종). `hero`와 `closing`은 옮기거나 지우거나 새로 넣을 수 없음 |
 | `set_layout(layout_id)` | `editorial-split` / `image-first` / `catalog-grid` |
 | `inspect_photo(index, question)` | 새 문구의 근거를 사진에서 확인 |
-| `check_copy_grounding` | 근거 확인 |
 | `finish(reply)` | 종료 |
+
+편집할 때마다 `ApprovedDraftDto` 검증과 `react_document` 조립을 다시 해서, 저장할 수 없는 초안이 되면 그 자리에서 도구 오류로 돌려준다.
 
 ### 5.3 근거 세탁 방지
 
@@ -201,7 +209,7 @@ POST /internal/v1/ai/detail-page-jobs/{job_id}/draft/edits
 | `creator-instruction` | 장인이 지시에서 직접 말한 내용 | 수동 편집과 같은 취급 |
 | `rephrase` | 기존 문구를 줄이거나 다듬기만 함 | 통과. `changes`에 전후를 모두 보여줌 |
 | `image-visible` / `user-hints` | 사진이나 입력 정보에 근거 | 통과 |
-| `inferred` | 근거 없는 추정 | 고객용 문구에 넣지 않음. '확인 필요'와 `warnings`로 보냄 |
+| `inferred` | 근거 없는 추정 | 반영하지 않고 `warnings`로 장인에게 알림 |
 
 `rephrase`가 새 주장을 넣지 않았는지는 코드로 완전히 검증할 수 없다. 그래서 바뀐 문장 전후를 `changes`로 빠짐없이 돌려주고, 최종 판단은 장인의 승인 단계에 맡긴다. 승인 전에는 아무것도 렌더되지 않는다.
 
@@ -216,7 +224,7 @@ POST /internal/v1/ai/detail-page-jobs/{job_id}/draft/edits
 | 모드에 없는 도구는 실행되지 않음 | 모드별 레지스트리. 목록에 없는 이름이면 오류 결과를 돌려줌 |
 | 렌더 모드에서 승인 draft는 바뀌지 않음 | frozen `approved_draft`. 렌더 도구에는 문구나 블록 인자가 없음 |
 | 원본 사진을 다시 그리지 않음 | `regenerate_photo`는 생성 컷 역할만 받음. 최종 사진 세트는 항상 `ProductFidelityValidator`를 통과해야 함 (기존 `_validated_photo_set`) |
-| 생성 컷 수 상한 | `MAX_GENERATED_PHOTOS`를 도구 안에서 셈 |
+| 생성 컷 수 상한 | 생성 컷은 `prepare_photos`(기존 `MAX_GENERATED_PHOTOS` 적용)에서만 늘어남. `regenerate_photo`는 같은 자리를 바꾸기만 함 |
 | 근거 없는 문구는 고객용 결과에 나가지 않음 | 루프가 끝난 뒤 `sanitize_profile_for_render`를 항상 실행 |
 | 화면 구조는 서버가 결정 | `react_document`는 기존 빌더와 DTO 검증으로만 만듦 |
 | 전달 보장 | outbox, 재전송, lease는 루프 밖 기존 코드가 처리 |
