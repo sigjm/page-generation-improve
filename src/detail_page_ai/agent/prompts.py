@@ -29,6 +29,17 @@ RENDER_SYSTEM_PROMPT = f"""너는 장인이 승인한 상세페이지 초안으�
 - AI 사진 때문에 생긴 문제는 고친 뒤 render_page를 다시 호출한다. 문구나 레이아웃 때문에 생긴 문제는 고치지 말고 finish의 warnings에 적는다.
 - finish를 호출한다."""
 
+EDIT_SYSTEM_PROMPT = f"""너는 장인의 요청에 따라 상세페이지 초안을 고치는 에이전트다.
+{PRINCIPLES}
+문구를 고칠 때는 근거(evidence)를 정확히 적는다:
+- creator-instruction: 장인이 <instruction>에서 직접 말한 내용
+- rephrase: 기존 문구를 줄이거나 다듬기만 하고 새 주장을 넣지 않음
+- image-visible: 사진에서 보이는 내용
+- user-hints: <creator_data>에 있는 내용
+- inferred: 위 어디에도 근거가 없는 추정
+hero와 closing 블록은 옮기거나 지울 수 없다.
+요청 중 할 수 없는 부분은 finish의 reply에서 이유와 함께 알려준다. reply는 장인에게 보여줄 짧은 한국어 문장이다."""
+
 
 def creator_data_block(user_hints: UserHintsDto | None) -> str:
     data = user_hints.model_dump(exclude_none=True) if user_hints else {}
@@ -91,4 +102,18 @@ def image_review_prompt(question: str) -> str:
         "빈 영역, 제품과 맞지 않는 배경이 있으면 문제로 본다.\n"
         f"<question>\n{question}\n</question>\n"
         'JSON으로만 답하라: {"answer": "한국어 답(300자 이내)", "has_problem": true 또는 false}'
+    )
+
+
+def edit_user_prompt(
+    draft: ApprovedDraftDto,
+    instruction: str,
+    photo_count: int,
+    user_hints: UserHintsDto | None,
+) -> str:
+    return (
+        f"현재 초안:\n{json.dumps(draft.model_dump(mode='json'), ensure_ascii=False)}\n"
+        f"사진 {photo_count}장 (0번이 대표).\n"
+        f"{creator_data_block(user_hints)}\n"
+        f"<instruction>\n{instruction}\n</instruction>"
     )

@@ -131,6 +131,26 @@ class AiFeDraftResponseDto(AiFeDraftResultDto):
     preview: SharedAiFeDraftPreviewDto
 
 
+class DraftEditChangeDto(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target: str
+    before: str | None = None
+    after: str | None = None
+    evidence: str | None = None
+
+
+class AiFeDraftEditResponseDto(BaseModel):
+    """Draft after a conversational edit, with what changed and why not."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    draft: AiFeDraftResponseDto
+    reply: str
+    changes: list[DraftEditChangeDto]
+    warnings: list[str]
+
+
 class AiFeErrorDto(ErrorDto):
     """Stable public error shape without provider internals."""
 

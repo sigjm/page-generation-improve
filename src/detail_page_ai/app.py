@@ -16,6 +16,7 @@ from .ai_dto import (
     AiToBeStatusResponseDto,
     BeToAiApproveDraftRequestDto,
     BeToAiCreateJobRequestDto,
+    BeToAiEditDraftRequestDto,
     BeToAiSaveDraftRequestDto,
 )
 from .backend_client import BackendDeliveryError
@@ -27,6 +28,7 @@ from .dto import (
 )
 from .fe_dto import (
     AiFeApprovedResponseDto,
+    AiFeDraftEditResponseDto,
     AiFeDraftResponseDto,
     AiFeJobAcceptedResponseDto,
     AiFeJobStatusResponseDto,
@@ -37,8 +39,10 @@ from .service import (
     CapacityExceededError,
     DetailPageJobService,
     DraftVersionConflictError,
+    EditingDisabledError,
     IdempotencyConflictError,
 )
+from .pipeline import ModelBusyError
 
 
 class UnconfiguredBackend:
@@ -430,6 +434,45 @@ async def save_internal_detail_page_draft(
         raise HTTPException(status_code=409, detail="Draft version conflict") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail="Draft cannot be saved") from exc
+
+
+@app.post(
+    "/internal/v1/ai/detail-page-jobs/{job_id}/draft/edits",
+    response_model=AiFeDraftEditResponseDto,
+)
+async def edit_internal_detail_page_draft(
+    job_id: str,
+    request: BeToAiEditDraftRequestDto,
+    x_ai_internal_token: Annotated[str | None, Header(alias="X-AI-Internal-Token")] = None,
+):
+    """Apply a creator's natural-language edit to the draft (AGENT_MODE=agent only)."""
+    _require_internal_auth(x_ai_internal_token)
+    try:
+        outcome = await run_in_threadpool(
+            get_service().edit_draft,
+            job_id,
+            request.instruction,
+            expected_version=request.version,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Draft not found") from exc
+    except EditingDisabledError as exc:
+        raise HTTPException(status_code=400, detail="Conversational editing is disabled") from exc
+    except ModelBusyError as exc:
+        raise HTTPException(status_code=503, detail="AI model is busy") from exc
+    except DraftVersionConflictError as exc:
+        raise HTTPException(status_code=409, detail="Draft version conflict") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Draft cannot be edited") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="AI service is unavailable") from exc
+    return {
+        # Same shape FastAPI gives PUT …/draft: react_document keys are camelCase aliases.
+        "draft": outcome.draft.model_dump(mode="json", by_alias=True),
+        "reply": outcome.reply,
+        "changes": outcome.changes,
+        "warnings": outcome.warnings,
+    }
 
 
 @app.post(

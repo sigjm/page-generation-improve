@@ -71,6 +71,13 @@ class BeToAiSaveDraftRequestDto(_StrictAiBeDto):
     draft: ApprovedDraftDto
 
 
+class BeToAiEditDraftRequestDto(_StrictAiBeDto):
+    """Creator's natural-language edit request for the current draft."""
+
+    instruction: str = Field(min_length=1, max_length=1000)
+    version: int = Field(ge=1)
+
+
 class AiToBeAcceptedResponseDto(_StrictAiBeDto):
     """Accepted response returned to Product BE for an asynchronous job."""
 

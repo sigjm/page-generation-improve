@@ -1,18 +1,29 @@
 """A DetailPagePipeline whose steps are chosen by one tool-calling agent."""
 
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
-from ..dto import ProductProfileDto, UserHintsDto
+from ..dto import ApprovedDraftDto, ProductProfileDto, UserHintsDto
 from ..models import GeneratedImage, GenerationOptions, ProductPhotoSet
-from ..pipeline import DetailPagePipeline
+from ..pipeline import DetailPagePipeline, ModelBusyError
 from ..validation import ensure_editorial_page_plan
 from . import prompts
 from .loop import FALLBACKS, AgentState, LoopOutcome, Tool, run_agent_loop
-from .tools import draft_tools, render_tools
+from .tools import draft_tools, edit_tools, render_tools
 
 logger = logging.getLogger(__name__)
+
+
+EDIT_FAILED_REPLY = "요청을 처리하지 못했어요. 바꿀 부분을 한 가지씩 구체적으로 다시 알려 주세요."
+
+
+@dataclass(frozen=True, slots=True)
+class DraftEditResult:
+    draft: ApprovedDraftDto
+    reply: str
+    changes: list[dict]
+    warnings: list[str]
 
 
 class DetailPageAgent(DetailPagePipeline):
@@ -161,3 +172,30 @@ class DetailPageAgent(DetailPagePipeline):
         if state.warnings:
             logger.warning("agent render warnings: %s", state.warnings)
         return photo_set, generated_image
+
+    def edit_draft(
+        self,
+        *,
+        draft: ApprovedDraftDto,
+        instruction: str,
+        source_images: tuple[tuple[bytes, str], ...],
+        user_hints: UserHintsDto | None = None,
+    ) -> DraftEditResult:
+        """Apply one natural-language instruction; partial edits are discarded on failure."""
+        if not self._model_lock.acquire(timeout=self.edit_lock_timeout_seconds):
+            raise ModelBusyError("a generation job is using the model")
+        try:
+            state = AgentState(
+                mode="edit", source_images=source_images, user_hints=user_hints, draft=draft
+            )
+            outcome = self._run_loop(
+                state,
+                edit_tools(chat_client=self.chat_client),
+                prompts.EDIT_SYSTEM_PROMPT,
+                prompts.edit_user_prompt(draft, instruction, len(source_images), user_hints),
+            )
+        finally:
+            self._model_lock.release()
+        if not outcome.finished:
+            return DraftEditResult(draft, EDIT_FAILED_REPLY, [], state.warnings)
+        return DraftEditResult(state.draft, state.summary, state.changes, state.warnings)

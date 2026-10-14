@@ -56,6 +56,10 @@ class PendingGenerationNotFound(KeyError):
     """Raised when a BE delivery retry has no stored generation."""
 
 
+class ModelBusyError(RuntimeError):
+    """Raised when the shared model lock does not free up in time."""
+
+
 @dataclass(slots=True)
 class PipelineResult:
     generation_id: str

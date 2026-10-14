@@ -7,8 +7,16 @@ from typing import Any, Callable, Literal
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..dto import LayoutId, ProductProfileDto, UserHintsDto
+from ..dto import (
+    ApprovedDraftDto,
+    LayoutId,
+    PageBlockType,
+    PageBlockVariant,
+    ProductProfileDto,
+    UserHintsDto,
+)
 from ..models import GeneratedImage, PhotoGenerationFailure, ProductPhoto, ProductPhotoSet
+from ..react_document_builder import build_react_document_from_draft
 from ..validation import ensure_editorial_page_plan, sanitize_page_plan
 from . import prompts
 from .loop import AgentState, Tool
@@ -381,3 +389,192 @@ def render_tools(
             Tool("regenerate_photo", "AI 생성 사진 한 장을 다른 방향으로 다시 만든다.", RegeneratePhotoArgs, regenerate_photo, status=("GENERATING_BACKGROUNDS", 50), max_calls=3)
         )
     return _registry(*tools)
+
+
+EditEvidence = Literal["creator-instruction", "rephrase", "image-visible", "user-hints", "inferred"]
+TOP_LEVEL_COPY = ("product_name", "summary", "hero_headline", "hero_description", "usage_scene")
+BLOCK_FIELDS = ("eyebrow", "title", "body")
+FIXED_BLOCKS = {"hero", "closing"}
+
+
+class UpdateCopyArgs(_Args):
+    path: str = Field(
+        min_length=1,
+        max_length=120,
+        description="product_name, summary, hero_headline, hero_description, usage_scene 또는 blocks.<section_id>.<eyebrow|title|body>",
+    )
+    text: str = Field(min_length=1, max_length=500)
+    evidence: EditEvidence
+
+
+class UpdateBlockArgs(_Args):
+    section_id: str = Field(min_length=1, max_length=80)
+    variant: PageBlockVariant
+
+
+class MoveBlockArgs(_Args):
+    section_id: str = Field(min_length=1, max_length=80)
+    position: int = Field(ge=0, description="0부터 센 새 위치")
+
+
+class RemoveBlockArgs(_Args):
+    section_id: str = Field(min_length=1, max_length=80)
+
+
+class AddBlockArgs(_Args):
+    block_type: PageBlockType
+    after_section_id: str = Field(min_length=1, max_length=80)
+    title: str = Field(default="", max_length=120)
+    body: str = Field(default="", max_length=500)
+    evidence: EditEvidence
+
+
+class SetLayoutArgs(_Args):
+    layout_id: LayoutId
+
+
+class EditFinishArgs(_Args):
+    reply: str = Field(min_length=1, max_length=500)
+
+
+def _require_draft(state: AgentState) -> ApprovedDraftDto:
+    if state.draft is None:
+        raise ValueError("편집할 초안이 없습니다")
+    return state.draft
+
+
+def _set_draft(state: AgentState, data: dict[str, Any]) -> None:
+    """Re-check every limit and whitelist, and that the FE document still builds."""
+    draft = ApprovedDraftDto.model_validate(data)
+    build_react_document_from_draft(draft)
+    state.draft = draft
+
+
+def _block_index(blocks: list[dict[str, Any]], section_id: str) -> int:
+    for index, block in enumerate(blocks):
+        if block["section_id"] == section_id:
+            return index
+    raise ValueError(f"없는 section_id입니다: {section_id}")
+
+
+def _rejected_as_inferred(state: AgentState, text: str, evidence: str) -> dict[str, Any] | None:
+    if evidence != "inferred":
+        return None
+    state.warnings.append(
+        f"'{text[:60]}'은(는) 사진이나 입력 정보로 확인할 수 없어 반영하지 않았어요."
+    )
+    return {"applied": False, "reason": "근거 없는 추정은 반영하지 않습니다"}
+
+
+def _record(state: AgentState, target: str, before: Any, after: Any, evidence: str | None = None) -> None:
+    state.changes.append(
+        {
+            "target": target,
+            "before": None if before is None else str(before),
+            "after": None if after is None else str(after),
+            "evidence": evidence,
+        }
+    )
+
+
+def edit_tools(*, chat_client) -> dict[str, Tool]:
+    def update_copy(state: AgentState, args: UpdateCopyArgs) -> dict[str, Any]:
+        rejected = _rejected_as_inferred(state, args.text, args.evidence)
+        if rejected:
+            return rejected
+        data = _require_draft(state).model_dump()
+        if args.path in TOP_LEVEL_COPY:
+            target, field_name = data, args.path
+        else:
+            prefix, _, rest = args.path.partition(".")
+            section_id, _, field_name = rest.rpartition(".")
+            if prefix != "blocks" or not section_id or field_name not in BLOCK_FIELDS:
+                raise ValueError("path는 blocks.<section_id>.<eyebrow|title|body> 형식이어야 합니다")
+            target = data["page_plan"][_block_index(data["page_plan"], section_id)]
+        before = target[field_name]
+        target[field_name] = args.text
+        _set_draft(state, data)
+        _record(state, args.path, before, args.text, args.evidence)
+        return {"applied": True}
+
+    def update_block(state: AgentState, args: UpdateBlockArgs) -> dict[str, Any]:
+        data = _require_draft(state).model_dump()
+        block = data["page_plan"][_block_index(data["page_plan"], args.section_id)]
+        before = block["variant"]
+        block["variant"] = args.variant
+        _set_draft(state, data)
+        _record(state, f"blocks.{args.section_id}.variant", before, args.variant)
+        return {"applied": True}
+
+    def move_block(state: AgentState, args: MoveBlockArgs) -> dict[str, Any]:
+        data = _require_draft(state).model_dump()
+        blocks = data["page_plan"]
+        index = _block_index(blocks, args.section_id)
+        if blocks[index]["block_type"] in FIXED_BLOCKS:
+            raise ValueError("hero와 closing은 옮길 수 없습니다")
+        block = blocks.pop(index)
+        low = 1 if blocks and blocks[0]["block_type"] == "hero" else 0
+        high = len(blocks) - 1 if blocks and blocks[-1]["block_type"] == "closing" else len(blocks)
+        position = min(max(args.position, low), high)
+        blocks.insert(position, block)
+        _set_draft(state, data)
+        _record(state, f"blocks.{args.section_id}.position", index, position)
+        return {"applied": True, "position": position}
+
+    def remove_block(state: AgentState, args: RemoveBlockArgs) -> dict[str, Any]:
+        data = _require_draft(state).model_dump()
+        blocks = data["page_plan"]
+        index = _block_index(blocks, args.section_id)
+        if blocks[index]["block_type"] in FIXED_BLOCKS:
+            raise ValueError("hero와 closing은 지울 수 없습니다")
+        removed = blocks.pop(index)
+        _set_draft(state, data)
+        _record(state, f"blocks.{args.section_id}", removed["block_type"], None)
+        return {"applied": True}
+
+    def add_block(state: AgentState, args: AddBlockArgs) -> dict[str, Any]:
+        rejected = _rejected_as_inferred(state, f"{args.title} {args.body}".strip(), args.evidence)
+        if rejected:
+            return rejected
+        if args.block_type in FIXED_BLOCKS:
+            raise ValueError("hero와 closing은 새로 넣을 수 없습니다")
+        data = _require_draft(state).model_dump()
+        blocks = data["page_plan"]
+        index = _block_index(blocks, args.after_section_id)
+        if blocks[index]["block_type"] == "closing":
+            raise ValueError("closing 뒤에는 블록을 넣을 수 없습니다")
+        existing = {block["section_id"] for block in blocks}
+        number = 1
+        while f"{args.block_type}-{number}" in existing:
+            number += 1
+        section_id = f"{args.block_type}-{number}"
+        blocks.insert(
+            index + 1,
+            {"section_id": section_id, "block_type": args.block_type, "title": args.title, "body": args.body},
+        )
+        _set_draft(state, data)
+        _record(state, f"blocks.{section_id}", None, args.block_type, args.evidence)
+        return {"applied": True, "section_id": section_id}
+
+    def set_layout(state: AgentState, args: SetLayoutArgs) -> dict[str, Any]:
+        data = _require_draft(state).model_dump()
+        before = data["layout_id"]
+        data["layout_id"] = args.layout_id
+        _set_draft(state, data)
+        _record(state, "layout_id", before, args.layout_id)
+        return {"applied": True}
+
+    def finish(state: AgentState, args: EditFinishArgs) -> dict[str, Any]:
+        state.summary = args.reply
+        return {"ok": True}
+
+    return _registry(
+        Tool("update_copy", "문구 하나를 고친다. evidence를 정확히 적는다.", UpdateCopyArgs, update_copy),
+        Tool("update_block", "블록의 배경 변형을 바꾼다.", UpdateBlockArgs, update_block),
+        Tool("move_block", "블록 순서를 바꾼다.", MoveBlockArgs, move_block),
+        Tool("remove_block", "블록을 지운다.", RemoveBlockArgs, remove_block),
+        Tool("add_block", "블록을 하나 추가한다.", AddBlockArgs, add_block),
+        Tool("set_layout", "레이아웃을 바꾼다.", SetLayoutArgs, set_layout),
+        inspect_photo_tool(chat_client),
+        Tool("finish", "편집을 끝내고 장인에게 답한다.", EditFinishArgs, finish),
+    )
