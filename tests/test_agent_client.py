@@ -114,3 +114,31 @@ def test_local_model_errors_are_model_call_errors():
     from detail_page_ai.ports import ModelCallError
 
     assert issubclass(LocalModelError, ModelCallError)
+
+
+def test_http_errors_carry_the_server_reason(monkeypatch):
+    # Live MLX run (2026-10-14): memory-admission refusals surfaced only as
+    # "HTTP Error 400: Bad Request"; the reason sat in the response body.
+    import io
+    from urllib import error, request
+
+    from local_detail_page_ai.clients import UrllibJsonTransport
+
+    def refuse(http_request, timeout):
+        raise error.HTTPError(
+            http_request.full_url,
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"error": {"message": "PrefillDoesNotFit"}}'),
+        )
+
+    monkeypatch.setattr(request, "urlopen", refuse)
+
+    try:
+        UrllibJsonTransport().post("http://model/v1/chat/completions", {}, 1.0)
+    except LocalModelError as exc:
+        assert "HTTP Error 400" in str(exc)
+        assert "PrefillDoesNotFit" in str(exc)
+    else:
+        raise AssertionError("an HTTP error must raise LocalModelError")

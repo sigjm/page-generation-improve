@@ -103,7 +103,12 @@ class UrllibJsonTransport:
         try:
             with request.urlopen(http_request, timeout=timeout) as response:
                 raw = response.read()
-        except (error.HTTPError, error.URLError, TimeoutError) as exc:
+        except error.HTTPError as exc:
+            # The status line alone ("400: Bad Request") hides why the server
+            # refused, e.g. MLX Serve's memory-admission "PrefillDoesNotFit".
+            reason = exc.read(500).decode("utf-8", "replace").strip()
+            raise LocalModelError(f"Local model request failed: {exc} {reason}".rstrip()) from exc
+        except (error.URLError, TimeoutError) as exc:
             raise LocalModelError(f"Local model request failed: {exc}") from exc
         try:
             payload = json.loads(raw.decode("utf-8"))
