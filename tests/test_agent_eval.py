@@ -28,3 +28,11 @@ def test_agent_trace_is_saved_next_to_the_case_output(tmp_path):
 
 def test_fixed_pipeline_has_no_trace(tmp_path):
     assert save_agent_trace(build_local_pipeline(image_provider="none"), tmp_path) is None
+
+
+def test_local_pipeline_passes_image_steps_to_the_image_client():
+    # Qwen-Image on MLX Serve needs ~20 steps; the FLUX.2 klein default of 4
+    # gives a blurred gradient (live check 2026-10-14).
+    pipeline = build_local_pipeline(image_provider="mlx", image_steps=20)
+
+    assert pipeline.photo_generator.background_generator.image_client.steps == 20

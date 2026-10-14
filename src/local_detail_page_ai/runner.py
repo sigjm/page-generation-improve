@@ -137,6 +137,7 @@ def build_local_pipeline(
     image_url: str = "http://127.0.0.1:11234",
     image_model: str = "mlx-community/flux2-klein-9b-4bit",
     image_timeout: float = 300.0,
+    image_steps: int = 4,
     agent_mode: str = "pipeline",
 ) -> DetailPagePipeline:
     if text_provider == "mlx":
@@ -159,6 +160,7 @@ def build_local_pipeline(
             base_url=image_url,
             model=image_model,
             timeout=image_timeout,
+            steps=image_steps,
         )
         background_generator = MlxServeBackgroundGenerator(image_client)
         usage_scene_generator = MlxServeUsageSceneGenerator(image_client)

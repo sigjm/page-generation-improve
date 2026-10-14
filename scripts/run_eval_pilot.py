@@ -282,6 +282,7 @@ def run_pilot(args: argparse.Namespace) -> int:
         image_url=args.image_url,
         image_model=args.image_model,
         image_timeout=args.image_timeout,
+        image_steps=getattr(args, "image_steps", 4),
         agent_mode=agent_mode,
     )
 
@@ -508,6 +509,12 @@ def main() -> None:
         type=float,
         default=300.0,
         help="Text model timeout in seconds (default: 300.0)",
+    )
+    parser.add_argument(
+        "--image-steps",
+        type=int,
+        default=4,
+        help="Diffusion steps for the MLX image model (FLUX.2 klein: 4, Qwen-Image: about 20).",
     )
     parser.add_argument(
         "--agent-mode",
