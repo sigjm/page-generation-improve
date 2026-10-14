@@ -224,6 +224,54 @@ class MlxServeChatClient:
             raise LocalModelError("MLX Serve response has no message content")
         return _parse_json_object(content_text, provider="MLX Serve")
 
+    def chat_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Return one assistant turn as {"content": str, "tool_calls": [...]}.
+
+        Each tool call is {"id", "name", "arguments"}. Arguments stay a JSON
+        string so the agent loop can report malformed JSON back to the model.
+        """
+        response = self.transport.post(
+            f"{self.base_url}/v1/chat/completions",
+            {
+                "model": self.model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+                "stream": False,
+                "temperature": 0,
+                "max_tokens": self.max_tokens,
+            },
+            self.timeout,
+        )
+        choices = response.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        message = choice.get("message") if isinstance(choice, dict) else None
+        if not isinstance(message, dict):
+            raise LocalModelError("MLX Serve response has no message")
+        tool_calls = []
+        for index, call in enumerate(message.get("tool_calls") or []):
+            function = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get("arguments") or "{}"
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            tool_calls.append(
+                {
+                    "id": call.get("id") or f"call-{index}",
+                    "name": str(function.get("name") or ""),
+                    "arguments": arguments,
+                }
+            )
+        return {
+            "content": _message_content_text(message.get("content")),
+            "tool_calls": tool_calls,
+        }
+
 
 class MlxServeImageClient:
     """MLX Serve image-generation client for Flux image models."""
