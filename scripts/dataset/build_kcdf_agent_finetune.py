@@ -113,7 +113,11 @@ def structure(args: argparse.Namespace) -> int:
             continue
         try:
             raw = Structured.model_validate(client.generate_json(structure_prompt(page, lines)))
-        except (LocalModelError, ValidationError) as exc:
+        except LocalModelError as exc:
+            # Server down or busy: record nothing, so the next run retries this product.
+            print(f"{product_dir.name}: model server error, stopping this run: {exc}"[:300], flush=True)
+            return 1
+        except ValidationError as exc:
             _write(out, {"error": f"{type(exc).__name__}: {exc}"[:500]})
             continue
         kept = validate_structured(raw, lines, page=page)
