@@ -103,7 +103,7 @@ BE ─▶ FastAPI(app.py) ─▶ DetailPageJobService(service.py)        ← 변
 | 설정 | 기본값 | 의미 |
 |---|---|---|
 | `AGENT_MODE` | `agent` | `pipeline`이면 기존 `DetailPagePipeline`을 그대로 씀 |
-| `AGENT_MAX_TOOL_CALLS` | `15` | 한 번 실행할 때의 도구 호출 상한 |
+| `AGENT_MAX_TOOL_CALLS` | `15` | 한 번 실행할 때 실제로 실행된 도구 호출 상한이자 모델 턴 상한. 거절된 호출(없는 도구, 횟수 초과)은 아무것도 실행하지 않으므로 세지 않음 |
 | `AGENT_TIMEOUT_SECONDS` | `600` | 루프 전체 제한 시간. 도구를 하나 실행하기 전마다 확인 |
 | (고정) 편집 모드 | 8회 / 90초 | 동기 요청이 모델 잠금을 오래 쥐지 않게 따로 둠 |
 | (고정) `prepare_photos` / `analyze_photos` | 1회 / 2회 | 무거운 도구의 반복 실행 방지 |

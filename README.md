@@ -455,7 +455,7 @@ npm run render:detail-page -- \
 | `PROMPT_VERSION` | — | 프롬프트 버전 표시 |
 | `REMBG_USE_CUDA` | 꺼짐 | `1`이면 누끼를 GPU에서 실행 |
 | `AGENT_MODE` | `agent` | `agent`면 Qwen이 도구를 골라 실행, `pipeline`이면 기존 고정 순서 |
-| `AGENT_MAX_TOOL_CALLS` / `AGENT_TIMEOUT_SECONDS` | `15` / `600` | 에이전트 한 번 실행의 도구 호출 상한 · 제한 시간 |
+| `AGENT_MAX_TOOL_CALLS` / `AGENT_TIMEOUT_SECONDS` | `15` / `600` | 에이전트 한 번 실행의 도구 호출 · 모델 턴 상한(거절된 호출은 세지 않음) · 제한 시간 |
 
 ### BE 연동과 한도
 

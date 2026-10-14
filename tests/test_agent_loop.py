@@ -313,3 +313,28 @@ def test_capped_tools_state_their_limit_up_front():
     tool = Tool("inspect", "검수한다.", NoArgs, lambda state, args: {}, max_calls=2)
 
     assert tool.schema()["function"]["description"] == "검수한다. 최대 2회까지 부를 수 있다."
+
+
+def test_rejected_calls_do_not_use_up_the_budget():
+    # Live MLX run: Qwen asked for inspect_render 8-10 times in one turn past
+    # its cap, and the rejected calls exhausted the render budget.
+    tools, log = make_tools()
+    tools["echo"].max_calls = 1
+    spam = [call("echo", {"text": str(n)}, f"c{n}") for n in range(5)]
+    client = ScriptedClient(turn(*spam), turn(call("finish")))
+
+    outcome, state = run(client, tools, max_tool_calls=3)
+
+    assert outcome == LoopOutcome(True, "finished")
+    assert log == ["0"]
+    assert [entry.outcome for entry in state.trace].count("rejected") == 4
+
+
+def test_turns_are_capped_even_when_every_call_is_rejected():
+    tools, _ = make_tools()
+    client = ScriptedClient(*[turn(call("delete_everything")) for _ in range(5)])
+
+    outcome, _ = run(client, tools, max_tool_calls=3)
+
+    assert outcome == LoopOutcome(False, "budget")
+    assert len(client.requests) == 3

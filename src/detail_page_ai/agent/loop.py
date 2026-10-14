@@ -124,12 +124,18 @@ def run_agent_loop(
     ]
     deadline = clock() + timeout_seconds
     calls = 0
+    turns = 0
     counts: dict[str, int] = {}
     nudged = False
     failing_tool, failures = "", 0
     while True:
         if clock() >= deadline:
             return LoopOutcome(False, "timeout")
+        # Rejected calls are free, so cap the model turns too; otherwise a model
+        # that keeps calling capped or unknown tools would loop until the timeout.
+        if turns >= max_tool_calls:
+            return LoopOutcome(False, "budget")
+        turns += 1
         # Stop offering tools that hit their cap; the model tends to keep calling them.
         schemas = [
             tool.schema()
@@ -167,8 +173,9 @@ def run_agent_loop(
                 return LoopOutcome(False, "budget")
             if clock() >= deadline:
                 return LoopOutcome(False, "timeout")
-            calls += 1
             entry = _execute(tool_call, tools, state, counts, on_status)
+            if entry.outcome != "rejected":  # a rejected call ran nothing
+                calls += 1
             state.trace.append(entry)
             metric_tool = entry.tool if entry.tool in tools else "unknown"
             TOOL_CALLS.labels(state.mode, metric_tool, entry.outcome).inc()
