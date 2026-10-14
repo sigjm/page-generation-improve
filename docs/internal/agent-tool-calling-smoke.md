@@ -64,7 +64,18 @@ FLUX.2 klein은 이 Mac에서 지워진 상태라 `ddalcu/Qwen-Image-2.1-MLX-Ser
 |---|---|---|---|---|
 | Qwen3.8-27B 4bit (16.9GB) | 6/6 | 약 171초 | **0장** (이미지 모델 로드 거부) | 렌더 2건이 거절된 호출로 예산 소진 → 이후 수정 |
 | Qwen3.5-4B 4bit (2.9GB) | 5/6 | 약 96초 | 6장 | 도자기 1건이 분석 결과 형식 불일치로 실패. 5건 모두 상품명(`display_name`) 비어 있음. 가구를 '악기'로 판정. 문구가 "제품의 사용 상황을 확인하실 수 있습니다"처럼 일반적. 초안에서 `revise_copy`·`inspect_photo`를 쓰지 않음 |
+| Qwen3.8-9B-Distill 4bit (5.6GB, 직접 변환) | 4/6 | 약 86초 | 0장 (이미지 모델 로드 거부, 확보 가능 13.8GB) | 직물 1건 형식 불일치, 금속 1건 JSON 깨짐. 상품명이 나온 건이 있음('청화백자 연꽃문 주전자'). 초안에서 `revise_copy` 사용. 횟수가 다 찬 `inspect_render`를 턴마다 다시 불러 렌더 2건이 턴 상한(15)에 걸림 |
 
 - Qwen3.5-4B는 섹션 이름을 사진 ID로 착각해 `inspect_image`가 3번 연속 실패했습니다. 이제 오류 결과에 쓸 수 있는 사진 ID 목록을 함께 돌려줍니다.
 - 결론: 로컬에서 Qwen-Image와 함께 쓰려면 4B급이 필요하고, 그만큼 문구와 분류 품질이 떨어집니다. 운영과 같은 품질을 확인하려면 FLUX.2 klein 9B(8.9GB, Qwen3.8과 합 25.8GB)를 다시 받는 쪽이 맞습니다. 사람 검수는 아직 하지 않았습니다.
+
+### Qwen3.8-9B 메모
+
+- Qwen 공식 릴리스가 아니라 커뮤니티 모델 `empero-ai/Qwen3.8-9B-Distill`입니다. Qwen3.8 2.4T의 답변 약 7만 건으로 Qwen3.5-9B를 전체 미세조정했고, 수학·코드 비중이 높습니다. Apache-2.0입니다.
+- 공개된 MLX 4bit 빌드(`keXjos/Qwen3.8-9B-mlx-4Bit`)는 비전 설정이 없는 텍스트 전용이라 사진 분석에 쓸 수 없습니다. 그래서 mlx-vlm 0.7.8로 비전을 포함해 직접 변환했습니다.
+  ```
+  mlx_vlm convert --hf-path empero-ai/Qwen3.8-9B-Distill --mlx-path ~/.mlx-serve/models/empero-ai/Qwen3.8-9B-Distill-MLX-4bit -q --q-bits 4 --q-group-size 64
+  ```
+  - Hugging Face 캐시의 `tokenizer.json`이 읽기 전용이면 프로세서 저장 단계에서 실패하고, 설정에 양자화 정보가 빠집니다. 캐시에 쓰기 권한을 준 뒤 다시 변환하면 됩니다.
+- 이미지 모델 로드 가능 여부는 그 시점 Mac의 여유 메모리에 따라 달라졌습니다(4B 때 33.9GB, 9B 때 13.8GB). Qwen-Image 8bit는 올릴 때 최대 21GB가 필요해서, 텍스트 모델과 안정적으로 함께 쓰려면 더 가벼운 이미지 모델(FLUX.2 klein 9B, 8.9GB)이 필요합니다.
 
