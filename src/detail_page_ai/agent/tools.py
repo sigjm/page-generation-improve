@@ -17,7 +17,7 @@ from ..dto import (
 )
 from ..models import GeneratedImage, PhotoGenerationFailure, ProductPhoto, ProductPhotoSet
 from ..react_document_builder import build_react_document_from_draft
-from ..validation import ensure_editorial_page_plan, sanitize_page_plan
+from ..validation import ensure_editorial_page_plan, is_grounded_copy, sanitize_page_plan
 from . import prompts
 from .loop import AgentState, Tool
 
@@ -60,7 +60,7 @@ class _RevisedItem(BaseModel):
     title: str = Field(min_length=1, max_length=80)
     description: str = Field(min_length=1, max_length=300)
     # A missing label means nobody vouched for the text, so sanitize drops it.
-    evidence: Literal["image-visible", "inferred", "unknown"] = "inferred"
+    evidence: Literal["image-visible", "creator-provided", "inferred", "unknown"] = "inferred"
 
 
 class _RevisedCopy(BaseModel):
@@ -95,16 +95,16 @@ def profile_summary(profile: ProductProfileDto) -> dict[str, Any]:
     }
 
 
-def grounding_report(profile: ProductProfileDto) -> dict[str, Any]:
+def grounding_report(profile: ProductProfileDto, user_hints: UserHintsDto | None = None) -> dict[str, Any]:
     """What sanitize_profile_for_render would drop from the customer page."""
     ungrounded = [
         {"target": f"features.{index}", "title": item.title, "description": item.description, "evidence": item.evidence}
         for index, item in enumerate(profile.features)
-        if item.evidence != "image-visible"
+        if not is_grounded_copy(item, user_hints)
     ] + [
         {"target": f"copy_sections.{index}", "title": item.title, "description": item.description, "evidence": item.evidence}
         for index, item in enumerate(profile.copy_sections)
-        if item.evidence != "image-visible"
+        if not is_grounded_copy(item, user_hints)
     ]
     kept = {block.section_id for block in sanitize_page_plan(profile.page_plan)}
     removed_blocks = [
@@ -173,11 +173,11 @@ def draft_tools(
         return profile_summary(state.profile)
 
     def check_copy_grounding(state: AgentState, args: NoArgs) -> dict[str, Any]:
-        return grounding_report(_require_profile(state))
+        return grounding_report(_require_profile(state), state.user_hints)
 
     def revise_copy(state: AgentState, args: ReviseCopyArgs) -> dict[str, Any]:
         profile = _require_profile(state)
-        report = {item["target"]: item for item in grounding_report(profile)["ungrounded"]}
+        report = {item["target"]: item for item in grounding_report(profile, state.user_hints)["ungrounded"]}
         requested = [report[target] for target in args.targets if target in report]
         if not requested:
             raise ValueError("고칠 target이 없습니다. check_copy_grounding의 target 값을 쓰세요")
@@ -197,7 +197,7 @@ def draft_tools(
         return {
             "applied": applied,
             "still_ungrounded": [
-                item["target"] for item in grounding_report(state.profile)["ungrounded"]
+                item["target"] for item in grounding_report(state.profile, state.user_hints)["ungrounded"]
             ],
         }
 

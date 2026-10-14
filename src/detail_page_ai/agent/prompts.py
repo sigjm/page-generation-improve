@@ -75,8 +75,8 @@ def revise_copy_prompt(
     return (
         "아래 문구는 근거가 부족해 고객용 페이지에서 빠질 예정이다. 첨부 사진, "
         "<creator_data>, <observations>에 근거가 있는 내용만으로 다시 써라.\n"
-        "근거가 있으면 evidence를 image-visible로, 여전히 근거가 없으면 inferred로 "
-        "표시하라. 근거 없는 내용을 지어내지 마라.\n"
+        "사진에서 보이면 evidence를 image-visible로, <creator_data>에 있는 내용이면 creator-provided로, "
+        "여전히 근거가 없으면 inferred로 표시하라. 근거 없는 내용을 지어내지 마라.\n"
         f"제품: {profile.display_name or profile.product_type}\n"
         f"{creator_data_block(user_hints)}\n"
         f"<observations>\n{json.dumps(observations, ensure_ascii=False)}\n</observations>\n"
@@ -84,7 +84,7 @@ def revise_copy_prompt(
         f"추가 지시: {instruction or '없음'}\n"
         'JSON으로만 답하라: {"items": [{"target": "items의 target", '
         '"title": "80자 이내", "description": "300자 이내", '
-        '"evidence": "image-visible" 또는 "inferred"}]}'
+        '"evidence": "image-visible", "creator-provided" 또는 "inferred"}]}'
     )
 
 
