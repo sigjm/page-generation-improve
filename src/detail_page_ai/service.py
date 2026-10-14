@@ -500,6 +500,7 @@ class DetailPageJobService:
                         request_id=job.request_id,
                         source_image=job.source_image,
                         source_mime_type=job.source_mime_type,
+                        additional_source_images=job.additional_source_images,
                         user_hints=job.user_hints,
                         source_asset_id=job.source_asset_id,
                         status_callback=pipeline_kwargs["status_callback"],
