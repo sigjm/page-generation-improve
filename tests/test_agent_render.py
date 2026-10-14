@@ -279,3 +279,38 @@ def test_regenerate_is_capped_at_three_calls():
     render(build(DetailPageAgent, client, generator))
 
     assert len(generator.regenerate_calls) == 3
+
+
+def test_render_finishes_without_the_text_model():
+    from detail_page_ai.ports import ModelCallError
+
+    class DownClient:
+        def chat_with_tools(self, messages, tools):
+            raise ModelCallError("text model is down")
+
+    agent_result = render(build(DetailPageAgent, DownClient()))
+    pipeline_result = render(build(DetailPagePipeline))
+
+    assert agent_result.fe_result.model_dump() == pipeline_result.fe_result.model_dump()
+
+
+def test_photos_are_prepared_at_most_once():
+    class CountingGenerator(FakePhotoGenerator):
+        calls = 0
+
+        def generate(self, **kwargs):
+            CountingGenerator.calls += 1
+            return super().generate(**kwargs)
+
+    client = ScriptedClient(
+        turns=[
+            turn(call("prepare_photos")),
+            turn(call("prepare_photos")),
+            turn(call("render_page")),
+            turn(call("finish")),
+        ]
+    )
+
+    render(build(DetailPageAgent, client, CountingGenerator()))
+
+    assert CountingGenerator.calls == 1

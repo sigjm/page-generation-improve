@@ -285,3 +285,37 @@ def test_draft_mode_cannot_call_render_tools():
     draft(agent)
 
     assert agent.last_runs["draft"]["trace"][0]["outcome"] == "rejected"
+
+
+def test_tool_calling_errors_fall_back_to_the_fixed_pipeline():
+    from detail_page_ai.ports import ModelCallError
+
+    class RejectsTools:
+        def chat_with_tools(self, messages, tools):
+            raise ModelCallError("HTTP Error 400: tools are not supported")
+
+    pipeline = DetailPagePipeline(
+        analyzer=CountingAnalyzer(),
+        renderer=NeverCalled(),
+        backend=object(),
+        id_factory=lambda: "gen-1",
+    )
+
+    assert draft(make_agent(RejectsTools())).profile == draft(pipeline).profile
+
+
+def test_a_dead_model_fails_the_draft_after_one_fallback_try():
+    from detail_page_ai.ports import ModelCallError
+
+    class DeadAnalyzer:
+        calls = 0
+
+        def analyze(self, image, mime_type, user_hints=None):
+            DeadAnalyzer.calls += 1
+            raise ModelCallError("vision model timed out")
+
+    client = ScriptedClient(turns=[turn(call("analyze_photos"))] * 3)
+
+    with pytest.raises(ModelCallError):
+        draft(make_agent(client, DeadAnalyzer()))
+    assert DeadAnalyzer.calls == 2

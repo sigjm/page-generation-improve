@@ -108,3 +108,9 @@ def test_chat_with_tools_rejects_response_without_message():
         pass
     else:
         raise AssertionError("a response without a message must raise LocalModelError")
+
+
+def test_local_model_errors_are_model_call_errors():
+    from detail_page_ai.ports import ModelCallError
+
+    assert issubclass(LocalModelError, ModelCallError)

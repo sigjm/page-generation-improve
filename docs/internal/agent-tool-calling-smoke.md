@@ -1,7 +1,7 @@
 # 에이전트 tool calling 스모크 결과
 
 `scripts/runtime/smoke_tool_calling.py`로 텍스트 서버가 OpenAI 형식 `tool_calls`를 돌려주는지 확인한 기록입니다.
-지원하지 않는 서버에서는 에이전트 루프가 매번 `no_tool_call`로 멈추고 기존 파이프라인으로 폴백합니다.
+지원하지 않는 서버에서는 에이전트 루프가 매번 멈추고(`tool_calls`가 없으면 `no_tool_call`, `tools` 요청을 거부하면 `model_error`) 기존 파이프라인으로 폴백합니다. 결과는 같지만 모델 호출이 한두 번 늘어납니다.
 
 | 날짜 | 서버 | 모델 | 결과 | 비고 |
 |---|---|---|---|---|

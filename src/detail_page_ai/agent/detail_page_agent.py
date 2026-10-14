@@ -7,6 +7,7 @@ from typing import Any, Callable
 from ..dto import ApprovedDraftDto, ProductProfileDto, UserHintsDto
 from ..models import GeneratedImage, GenerationOptions, ProductPhotoSet
 from ..pipeline import DetailPagePipeline, ModelBusyError
+from ..ports import ModelCallError
 from ..validation import ensure_editorial_page_plan
 from . import prompts
 from .loop import FALLBACKS, AgentState, LoopOutcome, Tool, run_agent_loop
@@ -36,6 +37,8 @@ class DetailPageAgent(DetailPagePipeline):
         max_tool_calls: int = 15,
         timeout_seconds: float = 600.0,
         edit_lock_timeout_seconds: float = 10.0,
+        edit_max_tool_calls: int = 8,
+        edit_timeout_seconds: float = 90.0,
         **pipeline_kwargs,
     ):
         super().__init__(**pipeline_kwargs)
@@ -43,6 +46,9 @@ class DetailPageAgent(DetailPagePipeline):
         self.max_tool_calls = max_tool_calls
         self.timeout_seconds = timeout_seconds
         self.edit_lock_timeout_seconds = edit_lock_timeout_seconds
+        # An edit is a synchronous request holding the model lock: keep it short.
+        self.edit_max_tool_calls = edit_max_tool_calls
+        self.edit_timeout_seconds = edit_timeout_seconds
         # ponytail: one slot per mode, valid because jobs run one at a time
         self.last_runs: dict[str, dict[str, Any]] = {}
 
@@ -54,16 +60,25 @@ class DetailPageAgent(DetailPagePipeline):
         user_prompt: str,
         status_callback: Callable[[str, int], None] | None = None,
     ) -> LoopOutcome:
-        outcome = run_agent_loop(
-            client=self.chat_client,
-            tools=tools,
-            state=state,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            max_tool_calls=self.max_tool_calls,
-            timeout_seconds=self.timeout_seconds,
-            on_status=status_callback,
-        )
+        editing = state.mode == "edit"
+        try:
+            outcome = run_agent_loop(
+                client=self.chat_client,
+                tools=tools,
+                state=state,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tool_calls=self.edit_max_tool_calls if editing else self.max_tool_calls,
+                timeout_seconds=self.edit_timeout_seconds if editing else self.timeout_seconds,
+                on_status=status_callback,
+            )
+        except ModelCallError:
+            if editing:
+                raise
+            # The fixed steps take over: rendering never needed the text model,
+            # and a draft fails there as before if the model is really down.
+            logger.warning("agent %s mode model call failed", state.mode, exc_info=True)
+            outcome = LoopOutcome(False, "model_error")
         self.last_runs[state.mode] = {
             "reason": outcome.reason,
             "trace": [asdict(entry) for entry in state.trace],

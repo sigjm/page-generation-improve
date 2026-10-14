@@ -216,7 +216,7 @@ def draft_tools(
         return {"ok": True}
 
     return _registry(
-        Tool("analyze_photos", "대표 사진과 장인 입력으로 제품 정보와 문구 초안을 만든다.", NoArgs, analyze_photos, status=("ANALYZING", 15)),
+        Tool("analyze_photos", "대표 사진과 장인 입력으로 제품 정보와 문구 초안을 만든다.", NoArgs, analyze_photos, status=("ANALYZING", 15), max_calls=2),
         inspect_photo_tool(chat_client),
         Tool("check_copy_grounding", "근거가 부족해 고객용 페이지에서 빠질 문구를 보여준다.", NoArgs, check_copy_grounding),
         Tool("revise_copy", "빠질 문구를 사진이나 장인 입력 근거 안에서 다시 쓴다.", ReviseCopyArgs, revise_copy, status=("ANALYZING", 25), max_calls=2),
@@ -377,7 +377,7 @@ def render_tools(
         return {"ok": True}
 
     tools = [
-        Tool("prepare_photos", "원본 보존 사진과 AI 보조 사진을 준비한다.", NoArgs, prepare_photos, status=("GENERATING_BACKGROUNDS", 45)),
+        Tool("prepare_photos", "원본 보존 사진과 AI 보조 사진을 준비한다.", NoArgs, prepare_photos, status=("GENERATING_BACKGROUNDS", 45), max_calls=1),
         Tool("verify_photos", "사진마다 원본 보존 검증 결과를 보여주고 통과하지 못한 사진을 뺀다.", NoArgs, verify_photos, status=("VERIFYING", 65)),
         Tool("inspect_image", "사진 한 장을 눈으로 검수한다.", InspectImageArgs, inspect_image, status=("VERIFYING", 65)),
         Tool("render_page", "페이지를 PNG로 렌더한다.", NoArgs, render_page, status=("RENDERING", 75), max_calls=2),
@@ -446,6 +446,8 @@ def _require_draft(state: AgentState) -> ApprovedDraftDto:
 def _set_draft(state: AgentState, data: dict[str, Any]) -> None:
     """Re-check every limit and whitelist, and that the FE document still builds."""
     draft = ApprovedDraftDto.model_validate(data)
+    if len(sanitize_page_plan(draft.page_plan)) != len(draft.page_plan):
+        raise ValueError("빈 추천 블록이나 다른 상품 홍보 블록은 저장되지 않아 넣을 수 없습니다")
     build_react_document_from_draft(draft)
     state.draft = draft
 

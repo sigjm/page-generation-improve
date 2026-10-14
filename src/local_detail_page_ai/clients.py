@@ -8,8 +8,10 @@ from io import BytesIO
 from typing import Any, Protocol
 from urllib import error, request
 
+from detail_page_ai.ports import ModelCallError
 
-class LocalModelError(RuntimeError):
+
+class LocalModelError(ModelCallError):
     """Raised when a local model server returns an unusable response."""
 
 

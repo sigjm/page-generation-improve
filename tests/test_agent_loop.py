@@ -264,3 +264,33 @@ def test_tool_calls_are_counted_in_metrics():
     run(ScriptedClient(turn(call("echo", {"text": "a"})), turn(call("finish"))), tools)
 
     assert REGISTRY.get_sample_value("agent_tool_calls_total", labels) == before + 1
+
+
+def test_model_errors_inside_a_tool_stop_the_loop_at_once():
+    from detail_page_ai.ports import ModelCallError
+
+    calls = []
+
+    def model_down(state, args):
+        calls.append(1)
+        raise ModelCallError("vision model timed out")
+
+    tools, _ = make_tools(down=Tool("down", "calls the model", NoArgs, model_down))
+    client = ScriptedClient(turn(call("down")), turn(call("down")), turn(call("down")))
+
+    with pytest.raises(ModelCallError):
+        run(client, tools)
+    assert calls == [1]
+
+
+def test_deadline_is_checked_before_every_tool_in_a_turn():
+    tools, log = make_tools()
+    ticks = iter([0.0, 0.0, 0.0, 100.0])
+    client = ScriptedClient(
+        turn(call("echo", {"text": "a"}, "c1"), call("echo", {"text": "b"}, "c2"))
+    )
+
+    outcome, _ = run(client, tools, timeout_seconds=50, clock=lambda: next(ticks))
+
+    assert outcome == LoopOutcome(False, "timeout")
+    assert log == ["a"]

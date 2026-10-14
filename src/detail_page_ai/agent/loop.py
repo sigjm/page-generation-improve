@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..dto import ApprovedDraftDto, ProductProfileDto, UserHintsDto
 from ..models import GeneratedImage, ProductPhotoSet
+from ..ports import ModelCallError
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,9 @@ class AgentState:
 @dataclass(frozen=True, slots=True)
 class LoopOutcome:
     finished: bool
-    reason: Literal["finished", "budget", "timeout", "no_tool_call", "repeated_failure"]
+    reason: Literal[
+        "finished", "budget", "timeout", "no_tool_call", "repeated_failure", "model_error"
+    ]
 
 
 def run_agent_loop(
@@ -108,8 +111,9 @@ def run_agent_loop(
 ) -> LoopOutcome:
     """Run tools until the model calls `finish` or a limit stops the loop.
 
-    Errors from the model call itself propagate: a fallback would need the
-    same model. Errors inside a tool go back to the model as the tool result.
+    Model errors (ModelCallError), from the loop's own call or inside a tool,
+    propagate so the caller can decide. Other tool errors go back to the model
+    as the tool result.
     """
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -153,6 +157,8 @@ def run_agent_loop(
         for tool_call in tool_calls:
             if calls >= max_tool_calls:
                 return LoopOutcome(False, "budget")
+            if clock() >= deadline:
+                return LoopOutcome(False, "timeout")
             calls += 1
             entry = _execute(tool_call, tools, state, counts, on_status)
             state.trace.append(entry)
@@ -226,6 +232,8 @@ def _execute(
     try:
         with TOOL_SECONDS.labels(state.mode, tool.name).time():
             result = tool.run(state, args)
+    except ModelCallError:
+        raise  # retrying a dead or confused model only multiplies the wait
     except Exception as exc:  # reported to the model, which decides what to do next
         logger.warning("agent tool %s failed", tool.name, exc_info=True)
         return entry("error", {"error": type(exc).__name__, "detail": str(exc)[:300]})

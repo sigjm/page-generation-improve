@@ -104,7 +104,9 @@ BE ─▶ FastAPI(app.py) ─▶ DetailPageJobService(service.py)        ← 변
 |---|---|---|
 | `AGENT_MODE` | `agent` | `pipeline`이면 기존 `DetailPagePipeline`을 그대로 씀 |
 | `AGENT_MAX_TOOL_CALLS` | `15` | 한 번 실행할 때의 도구 호출 상한 |
-| `AGENT_TIMEOUT_SECONDS` | `600` | 루프 전체 제한 시간 |
+| `AGENT_TIMEOUT_SECONDS` | `600` | 루프 전체 제한 시간. 도구를 하나 실행하기 전마다 확인 |
+| (고정) 편집 모드 | 8회 / 90초 | 동기 요청이 모델 잠금을 오래 쥐지 않게 따로 둠 |
+| (고정) `prepare_photos` / `analyze_photos` | 1회 / 2회 | 무거운 도구의 반복 실행 방지 |
 | (고정) 같은 도구 연속 실패 | 3회 | 넘으면 루프 중단 후 폴백 |
 | (고정) `revise_copy` | 2회 | |
 | (고정) `render_page` | 2회 | |
@@ -238,7 +240,7 @@ POST /internal/v1/ai/detail-page-jobs/{job_id}/draft/edits
 | 도구 실행 중 예외 | 예외 종류와 짧은 메시지를 결과로 돌려줌. 같은 도구가 연속 3회 실패하면 폴백 |
 | `tool_calls` 없이 텍스트만 반환 | 한 번 재요청. 또 그러면 폴백 |
 | `tool_calls` 인자 JSON이 깨짐 | `_parse_json_object`로 복구 시도. 실패하면 인자 오류와 같이 처리 |
-| 모델 서버 다운이나 타임아웃 (`LocalModelError`) | 폴백하지 않음. 기존처럼 `FAILED`, `retryable=true` |
+| 모델 호출 실패 (`ModelCallError`: 서버 다운, 타임아웃, `tools` 요청 거부, 쓸 수 없는 응답). 루프 자체 호출이든 도구 안이든 같음 | 재시도하지 않고 루프를 바로 멈춘 뒤 폴백. 초안 폴백은 같은 모델을 다시 부르므로 서버가 정말 죽었으면 기존처럼 `FAILED`, `retryable=true`. 렌더 폴백은 텍스트 모델이 필요 없어 그대로 완료됨. 편집은 폴백 없이 `503` |
 | 예산이나 제한 시간 초과 | 폴백 |
 
 ### 6.3 폴백

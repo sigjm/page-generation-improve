@@ -275,3 +275,42 @@ def test_route_maps_errors_to_status_codes(monkeypatch, error, status):
             )
         )
     assert caught.value.status_code == status
+
+
+def test_edits_have_their_own_small_budget():
+    service, client, job_id = ready_service(edit_max_tool_calls=2)
+    variant = call("update_block", {"section_id": "closing", "variant": "dark"})
+    client.turns = [turn(variant), turn(variant), turn(variant), turn(call("finish", {"reply": "끝"}))]
+
+    outcome = service.edit_draft(job_id, "마지막 어둡게", expected_version=1)
+
+    assert outcome.changes == []
+    assert "다시 알려 주세요" in outcome.reply
+
+
+def test_blocks_that_would_be_dropped_on_save_are_refused():
+    service, client, job_id = ready_service()
+    client.turns = [
+        turn(call("add_block", {"block_type": "recommendation", "after_section_id": "statement", "title": "함께 보면 좋은 연출", "evidence": "creator-instruction"})),
+        turn(call("finish", {"reply": "추천 블록을 넣었어요."})),
+    ]
+    agent = service.pipeline
+
+    outcome = service.edit_draft(job_id, "추천 섹션 넣어줘", expected_version=1)
+
+    assert outcome.changes == []
+    assert agent.last_runs["edit"]["trace"][0]["outcome"] == "error"
+
+
+def test_model_errors_during_an_edit_reach_the_caller():
+    from detail_page_ai.ports import ModelCallError
+
+    service, client, job_id = ready_service()
+
+    def model_down(remaining_turns):
+        raise ModelCallError("text model is down")
+
+    client.on_turn = model_down
+
+    with pytest.raises(ModelCallError):
+        service.edit_draft(job_id, "아무거나", expected_version=1)
