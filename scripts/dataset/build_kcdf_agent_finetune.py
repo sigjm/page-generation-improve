@@ -17,7 +17,13 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from detail_page_ai.finetune.crawl import SHOP, PoliteFetcher, ProductPage, crawl_shop
-from detail_page_ai.finetune.gold import Structured, clean_ocr_lines, structure_prompt, validate_structured
+from detail_page_ai.finetune.gold import (
+    Structured,
+    clean_ocr_lines,
+    join_sentences,
+    structure_prompt,
+    validate_structured,
+)
 
 MIN_OCR_HANGUL = 80
 
@@ -85,7 +91,7 @@ def ocr(args: argparse.Namespace) -> int:
 
 def ocr_lines(product_dir: Path) -> list[str]:
     per_image = json.loads((product_dir / "ocr.json").read_text(encoding="utf-8"))["per_image"]
-    return clean_ocr_lines([line for lines in per_image.values() for line in lines])
+    return join_sentences(clean_ocr_lines([line for lines in per_image.values() for line in lines]))
 
 
 def structure(args: argparse.Namespace) -> int:
@@ -134,7 +140,7 @@ def _variant(product_id: str, salt: str) -> int:
 
 def build(args: argparse.Namespace) -> int:
     import hashlib
-    from collections import Counter, defaultdict
+    from collections import Counter
 
     from detail_page_ai.finetune.conversations import (
         draft_conversation,

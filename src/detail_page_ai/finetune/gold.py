@@ -61,6 +61,24 @@ def clean_ocr_lines(lines: Sequence[str]) -> list[str]:
     return kept
 
 
+CONTINUES = re.compile(r"(,|며|고|서|은|는|의|와|과|을|를|이|가|에|로|으로|하여|면서)$")
+
+
+def join_sentences(lines: Sequence[str], limit: int = 300) -> list[str]:
+    """Reconnect sentences that OCR split across lines (a line ending in a comma or a
+    connective ending continues on the next line)."""
+    sentences: list[str] = []
+    pending = ""
+    for line in lines:
+        pending = f"{pending} {line}".strip() if pending else line
+        if not CONTINUES.search(pending) or len(pending) >= limit:
+            sentences.append(pending)
+            pending = ""
+    if pending:
+        sentences.append(pending)
+    return sentences
+
+
 def build_user_hints(page: ProductPage, lines: Sequence[str], limit: int = 2000) -> UserHintsDto:
     """What the artisan would paste into the form: the seller copy, then the spec table.
 
@@ -135,7 +153,12 @@ def validate_structured(structured: Structured, source: Sequence[str], *, page: 
 
     def sentence(text: str, limit: int) -> str:
         text = text.strip()
-        return text if text and len(text) <= limit and grounded(text, source) else ""
+        if not text or not grounded(text, source):
+            return ""
+        target = _norm(text)
+        whole = next((line for line in source if target and target in _norm(line)), text)
+        text = whole if len(whole) <= limit else text
+        return "" if len(text) > limit or text.endswith(",") else text
 
     def label(text: str, limit: int) -> str:
         text = text.strip()
@@ -145,7 +168,7 @@ def validate_structured(structured: Structured, source: Sequence[str], *, page: 
     for item in structured.features[:5]:
         title = label(str(item.get("title", "")), 80)
         description = sentence(str(item.get("description", "")), 300)
-        if title and description:
+        if title and description and description not in {f["description"] for f in features}:
             features.append({"title": title, "description": description})
     product_type = structured.product_type.strip()
     return Structured(
@@ -199,13 +222,6 @@ def _sentences(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"(?<=[.!?。])\s+", text) if part.strip()]
 
 
-def _short_title(text: str, limit: int = 40) -> str:
-    if len(text) <= limit:
-        return text
-    cut = text[:limit].rsplit(" ", 1)[0]
-    return cut or text[:limit]
-
-
 def _block(block_type: str, variant: str, page: ProductPage, s: Structured) -> PageBlockDto | None:
     common = {"section_id": block_type, "block_type": block_type, "variant": variant}
     if block_type == "hero":
@@ -249,8 +265,6 @@ def build_gold_profile(
         sections.append(CopySectionDto(section_type="hero", title=s.hero_title, description=s.hero_description))
     for feature in s.features:
         sections.append(CopySectionDto(section_type="feature", title=feature["title"], description=feature["description"]))
-    if s.usage:
-        sections.append(CopySectionDto(section_type="usage", title=_short_title(s.usage[0]), description=s.usage[0]))
     if s.closing_title:
         sections.append(CopySectionDto(section_type="closing", title=s.closing_title, description=s.closing_description or s.closing_title))
     summary = s.summary or s.hero_description or (s.making[0] if s.making else "")

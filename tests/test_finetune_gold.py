@@ -197,3 +197,68 @@ def test_clean_ocr_lines_drops_shop_banners_and_artist_cv_lines():
     ]
 
     assert clean_ocr_lines(lines) == ["나무 결을 살려 손으로 다듬었습니다."]
+
+
+def test_join_sentences_reconnects_ocr_line_breaks():
+    from detail_page_ai.finetune.gold import join_sentences
+
+    lines = [
+        "결을 잇는 나무 상자",
+        "화강석을 연상시키는 질감과 차분한 색감은 자연의 분위기를 담아내며,",
+        "한옥 형상의 손잡이 디자인은 한국적인 조형미를 더합니다.",
+        "손으로 다듬은 표면은",
+        "부드럽습니다.",
+    ]
+
+    assert join_sentences(lines) == [
+        "결을 잇는 나무 상자",
+        "화강석을 연상시키는 질감과 차분한 색감은 자연의 분위기를 담아내며, 한옥 형상의 손잡이 디자인은 한국적인 조형미를 더합니다.",
+        "손으로 다듬은 표면은 부드럽습니다.",
+    ]
+
+
+def test_fragments_are_widened_to_whole_sentences_and_duplicates_dropped():
+    from detail_page_ai.finetune.gold import join_sentences
+
+    source = join_sentences([
+        "화강석을 연상시키는 질감과 차분한 색감은 자연의 분위기를 담아내며,",
+        "한옥 형상의 손잡이 디자인은 한국적인 조형미를 더합니다.",
+        "뚜껑은 미닫이 방식으로 열립니다.",
+    ])
+    structured = Structured(
+        features=[
+            {"title": "화강석 질감", "description": "화강석을 연상시키는 질감과 차분한 색감은 자연의 분위기를 담아내며,"},
+            {"title": "한옥 형상", "description": "한옥 형상의 손잡이 디자인은 한국적인 조형미를 더합니다."},
+            {"title": "미닫이 뚜껑", "description": "뚜껑은 미닫이 방식으로"},
+        ],
+    )
+
+    kept = validate_structured(structured, source, page=PAGE)
+
+    assert kept.features == [
+        {"title": "화강석 질감", "description": source[0]},
+        {"title": "미닫이 뚜껑", "description": "뚜껑은 미닫이 방식으로 열립니다."},
+    ]
+
+
+def test_usage_lives_in_the_usage_block_not_a_copy_section():
+    source = clean_ocr_lines(LINES)
+    hints = build_user_hints(PAGE, source)
+    structured = validate_structured(
+        Structured(
+            hero_title="결을 잇는 나무 상자",
+            hero_description="서로 다른 나무를 이어 붙여 무늬를 만든 작은 상자입니다.",
+            features=[{"title": "미닫이 뚜껑", "description": "뚜껑은 미닫이 방식으로 열립니다."}],
+            usage=["책상 위 소품을 담아 두기 좋습니다."],
+            closing_title="오래 곁에 두는 생활 오브제",
+        ),
+        hint_lines(hints),
+        page=PAGE,
+    )
+    archetype = {"name": "사용", "sequence": ["hero", "usage_scene", "closing"], "variants": ["paper", "full-bleed", "paper"]}
+
+    profile = build_gold_profile(PAGE, "인테리어", structured, archetype, hints)
+
+    assert "usage" not in [section.section_type for section in profile.copy_sections]
+    assert profile.usage_scene == "책상 위 소품을 담아 두기 좋습니다."
+    assert [block.block_type for block in profile.page_plan] == ["hero", "usage_scene", "closing"]
