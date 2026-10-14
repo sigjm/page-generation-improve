@@ -112,12 +112,14 @@ def build_service(settings) -> DetailPageJobService:
                 base_url=settings.local_image_url,
                 model=settings.local_image_model,
                 timeout=settings.local_image_timeout_seconds,
+                steps=getattr(settings, "local_image_steps", 4),
             )
         else:
             image_client = SglangImageClient(
                 base_url=settings.local_image_url,
                 model=settings.local_image_model,
                 timeout=settings.local_image_timeout_seconds,
+                steps=getattr(settings, "local_image_steps", 4),
             )
         background_generator = MlxServeBackgroundGenerator(image_client)
         usage_scene_generator = MlxServeUsageSceneGenerator(image_client)

@@ -138,6 +138,7 @@ def test_build_service_wires_sglang_text_and_image_clients(monkeypatch, tmp_path
         "base_url": "http://sglang-image:30001",
         "model": "black-forest-labs/FLUX.2-klein-4B",
         "timeout": 300.0,
+        "steps": 4,
     }
 
 
