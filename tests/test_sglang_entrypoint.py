@@ -372,3 +372,13 @@ def test_image_server_keeps_uploads_and_outputs_off_the_read_only_root() -> None
     _, image_line = command_lines(result)
     assert "--output-path ''" in image_line
     assert "--input-save-path ''" in image_line
+
+
+def test_text_server_parses_tool_calls() -> None:
+    result = run_entrypoint(
+        text_model="cyankiwi/Qwen3.8-27B-AWQ-INT4",
+        image_model="circulus/FLUX.2-klein-9B-bnb-4bit",
+    )
+
+    text_line, _ = command_lines(result)
+    assert "--tool-call-parser qwen25" in text_line

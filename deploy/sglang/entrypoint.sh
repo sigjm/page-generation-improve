@@ -6,6 +6,7 @@ TEXT_MODEL_REVISION="${TEXT_MODEL_REVISION:-6e134bae811fb5adac50ee042ae5f029ac67
 TEXT_SERVED_MODEL_NAME="${TEXT_SERVED_MODEL_NAME:-qwen-text}"
 TEXT_MEM_FRACTION="${TEXT_MEM_FRACTION:-0.50}"
 TEXT_CONTEXT_LENGTH="${TEXT_CONTEXT_LENGTH:-16384}"
+TEXT_TOOL_CALL_PARSER="${TEXT_TOOL_CALL_PARSER:-qwen25}"
 IMAGE_MODEL_PATH="${IMAGE_MODEL_PATH:-circulus/FLUX.2-klein-9B-bnb-4bit}"
 IMAGE_MODEL_REVISION="${IMAGE_MODEL_REVISION:-58c2804f31af12c8888504b96250010c50b55e44}"
 IMAGE_SERVED_MODEL_NAME="${IMAGE_SERVED_MODEL_NAME:-flux-klein}"
@@ -51,6 +52,8 @@ text_command+=(
     --mem-fraction-static "$TEXT_MEM_FRACTION"
     --context-length "$TEXT_CONTEXT_LENGTH"
     --trust-remote-code
+    # The agent loop reads OpenAI-style tool_calls; Qwen emits them in the qwen25 format.
+    --tool-call-parser "$TEXT_TOOL_CALL_PARSER"
     # Stage 2026-10-01: text + image servers left 3.5 MiB of the L40S free, so
     # the cutout model and image preprocessing hit CUDA OOM. The prefill graphs
     # took 1.87 GB (and 4.6 min to capture) for one request at a time, and the

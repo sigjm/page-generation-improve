@@ -118,6 +118,15 @@ class Settings(BaseSettings):
     craft_confidence_threshold: float = Field(
         default=0.65, alias="CRAFT_CONFIDENCE_THRESHOLD", ge=0, le=1
     )
+    agent_mode: Literal["agent", "pipeline"] = Field(
+        default="agent", alias="AGENT_MODE"
+    )
+    agent_max_tool_calls: int = Field(
+        default=15, alias="AGENT_MAX_TOOL_CALLS", ge=1, le=50
+    )
+    agent_timeout_seconds: float = Field(
+        default=600.0, alias="AGENT_TIMEOUT_SECONDS", gt=0
+    )
 
 
 @lru_cache(maxsize=1)
