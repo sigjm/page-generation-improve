@@ -294,3 +294,14 @@ def test_deadline_is_checked_before_every_tool_in_a_turn():
 
     assert outcome == LoopOutcome(False, "timeout")
     assert log == ["a"]
+
+
+def test_exhausted_tools_are_no_longer_offered():
+    tools, _ = make_tools()
+    tools["echo"].max_calls = 1
+    client = ScriptedClient(turn(call("echo", {"text": "a"})), turn(call("finish")))
+
+    run(client, tools)
+
+    offered = [{schema["function"]["name"] for schema in request[1]} for request in client.requests]
+    assert offered == [{"echo", "boom", "finish"}, {"boom", "finish"}]

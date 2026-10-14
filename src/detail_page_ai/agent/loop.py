@@ -119,7 +119,6 @@ def run_agent_loop(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    schemas = [tool.schema() for tool in tools.values()]
     deadline = clock() + timeout_seconds
     calls = 0
     counts: dict[str, int] = {}
@@ -128,6 +127,12 @@ def run_agent_loop(
     while True:
         if clock() >= deadline:
             return LoopOutcome(False, "timeout")
+        # Stop offering tools that hit their cap; the model tends to keep calling them.
+        schemas = [
+            tool.schema()
+            for tool in tools.values()
+            if tool.max_calls is None or counts.get(tool.name, 0) < tool.max_calls
+        ]
         reply = client.chat_with_tools(messages, schemas)
         tool_calls = reply["tool_calls"]
         if not tool_calls:

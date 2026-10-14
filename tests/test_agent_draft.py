@@ -319,3 +319,24 @@ def test_a_dead_model_fails_the_draft_after_one_fallback_try():
     with pytest.raises(ModelCallError):
         draft(make_agent(client, DeadAnalyzer()))
     assert DeadAnalyzer.calls == 2
+
+
+def test_rewrite_without_an_evidence_label_counts_as_inferred():
+    client = ScriptedClient(
+        turns=[
+            turn(call("analyze_photos")),
+            turn(call("revise_copy", {"targets": ["copy_sections.1"]})),
+            turn(call("plan_page")),
+            turn(call("finish")),
+        ],
+        # Qwen on MLX Serve left out "evidence" in the live run (2026-10-14).
+        json_replies=[
+            {"items": [{"target": "copy_sections.1", "title": "다양한 활용", "description": "여러 공간에 어울립니다."}]}
+        ],
+    )
+    agent = make_agent(client)
+
+    result = draft(agent)
+
+    assert agent.last_runs["draft"]["trace"][1]["outcome"] == "ok"
+    assert "다양한 활용" not in [section.title for section in result.profile.copy_sections]

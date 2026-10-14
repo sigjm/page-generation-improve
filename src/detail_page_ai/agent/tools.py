@@ -59,7 +59,8 @@ class _RevisedItem(BaseModel):
     target: str
     title: str = Field(min_length=1, max_length=80)
     description: str = Field(min_length=1, max_length=300)
-    evidence: Literal["image-visible", "inferred", "unknown"]
+    # A missing label means nobody vouched for the text, so sanitize drops it.
+    evidence: Literal["image-visible", "inferred", "unknown"] = "inferred"
 
 
 class _RevisedCopy(BaseModel):
