@@ -18,6 +18,10 @@ dependencies = [
 dev = [
     "pytest>=9.1.1,<10",
 ]
+# Fine-tuning data tools (personal learning); OCR uses macOS Vision.
+dataset = [
+    "ocrmac>=1.0.1,<2; sys_platform == 'darwin'",
+]
 
 [project.scripts]
 serve-ai = "detail_page_ai.app:run"
