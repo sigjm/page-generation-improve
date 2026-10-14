@@ -99,33 +99,52 @@ def ocr_lines(product_dir: Path) -> list[str]:
     return join_sentences(clean_ocr_lines([line for lines in per_image.values() for line in lines]))
 
 
-def structure(args: argparse.Namespace) -> int:
-    from local_detail_page_ai.clients import LocalModelError, MlxServeChatClient
+def _teacher(args: argparse.Namespace):
+    """The labeling model: Codex by default, or a local MLX Serve model."""
+    if args.teacher == "codex":
+        from detail_page_ai.finetune.codex import CodexJsonClient
 
-    client = MlxServeChatClient(base_url=args.text_url, model=args.text_model, timeout=600)
-    done = 0
-    for product_dir in _products(args.root, "ocr.json", "structured.json"):
+        return CodexJsonClient(reasoning=args.codex_reasoning, service_tier=args.codex_tier)
+    from local_detail_page_ai.clients import MlxServeChatClient
+
+    return MlxServeChatClient(base_url=args.text_url, model=args.text_model, timeout=600)
+
+
+def structure(args: argparse.Namespace) -> int:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from detail_page_ai.finetune.codex import CodexError
+    from local_detail_page_ai.clients import LocalModelError
+
+    client = _teacher(args)
+    teacher = "codex" if args.teacher == "codex" else args.text_model
+
+    def one(product_dir: Path) -> str:
         page = _page(product_dir)
         lines = ocr_lines(product_dir)
         out = product_dir / "structured.json"
         if sum("가" <= ch <= "힣" for ch in "".join(lines)) < MIN_OCR_HANGUL:
             _write(out, {"skipped": "ocr text too short"})
-            continue
+            return "skipped"
         try:
             raw = Structured.model_validate(client.generate_json(structure_prompt(page, lines)))
-        except LocalModelError as exc:
-            # Server down or busy: record nothing, so the next run retries this product.
-            print(f"{product_dir.name}: model server error, stopping this run: {exc}"[:300], flush=True)
-            return 1
         except ValidationError as exc:
             _write(out, {"error": f"{type(exc).__name__}: {exc}"[:500]})
-            continue
+            return "invalid"
+        except (LocalModelError, CodexError) as exc:
+            # Server down, rate limit or a non-JSON reply: record nothing, so the next run retries.
+            print(f"{product_dir.name}: teacher error, will retry: {exc}"[:300], flush=True)
+            return "retry"
         kept = validate_structured(raw, lines, page=page)
-        _write(out, {"model": args.text_model, "raw": raw.model_dump(), "kept": kept.model_dump()})
-        done += 1
-        print(f"[{done}] {product_dir.name}: kept {len(kept.features)} features, "
-              f"{len(kept.making)} making, hero={'y' if kept.hero_title and kept.hero_description else 'n'}", flush=True)
-    return 0
+        _write(out, {"model": teacher, "raw": raw.model_dump(), "kept": kept.model_dump()})
+        print(f"{product_dir.name}: kept {len(kept.features)} features, {len(kept.making)} making, "
+              f"hero={'y' if kept.hero_title and kept.hero_description else 'n'}", flush=True)
+        return "ok"
+
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        results = list(pool.map(one, list(_products(args.root, "ocr.json", "structured.json"))))
+    print({result: results.count(result) for result in set(results)}, flush=True)
+    return 1 if "retry" in results else 0
 
 
 def _resized_jpeg(path: Path, longest: int = 1280) -> bytes:
@@ -192,11 +211,8 @@ def build(args: argparse.Namespace) -> int:
         for product_id, (product_dir, _, _, per_image) in products.items()
     }, brands={product_id: _page(product_dir).brand for product_id, (product_dir, *_) in products.items()})
 
-    from local_detail_page_ai.clients import MlxServeChatClient
-
-    judge = None
-    if args.judge_url:
-        judge = MlxServeChatClient(base_url=args.judge_url, model=args.judge_model, timeout=600, max_tokens=1024)
+    judge = None if args.no_judge else _teacher(args)
+    teacher = "codex" if args.teacher == "codex" else args.text_model
 
     photo_generator = renderer = None
     if not args.skip_render:
@@ -245,7 +261,7 @@ def build(args: argparse.Namespace) -> int:
                 {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": request["prompt"]}]},
                 {"role": "assistant", "content": [{"type": "text", "text": json.dumps(request["reply"], ensure_ascii=False)}]},
             ],
-            "teacher": args.judge_model,
+            "teacher": teacher,
         })
 
     for product_id, (product_dir, record, structured, per_image) in products.items():
@@ -336,16 +352,20 @@ def main() -> int:
     crawl_parser.add_argument("--image-interval", type=float, default=1.0)
     crawl_parser.set_defaults(run=crawl)
     commands.add_parser("ocr", help="OCR the detail images (macOS Vision).").set_defaults(run=ocr)
-    structure_parser = commands.add_parser("structure", help="Sort OCR sentences into roles with a local model.")
-    structure_parser.add_argument("--text-url", default="http://127.0.0.1:11234")
-    structure_parser.add_argument("--text-model", default="ddalcu/Qwen3.8-27B-MLX-Serve-4bit")
+    structure_parser = commands.add_parser("structure", help="Sort OCR sentences into roles with the teacher model.")
     structure_parser.set_defaults(run=structure)
     build_parser = commands.add_parser("build", help="Write analysis rows and agent conversations.")
     build_parser.add_argument("--max-per-group", type=int, default=5)
     build_parser.add_argument("--skip-render", action="store_true", help="Skip render conversations (no rembg/Playwright).")
-    build_parser.add_argument("--judge-url", default="http://127.0.0.1:11234", help="Vision model for inspect_* answers; empty to skip.")
-    build_parser.add_argument("--judge-model", default="ddalcu/Qwen3.8-27B-MLX-Serve-4bit")
+    build_parser.add_argument("--no-judge", action="store_true", help="No inspect_* calls (no teacher image answers).")
     build_parser.set_defaults(run=build)
+    for sub in (structure_parser, build_parser):
+        sub.add_argument("--teacher", choices=("codex", "mlx"), default="codex", help="Labeling model for sorting and image judgments.")
+        sub.add_argument("--codex-reasoning", default="xhigh")
+        sub.add_argument("--codex-tier", default="priority", help="Codex service tier; priority is the Fast tier.")
+        sub.add_argument("--workers", type=int, default=6, help="Parallel teacher calls.")
+        sub.add_argument("--text-url", default="http://127.0.0.1:11234", help="MLX Serve, for --teacher mlx.")
+        sub.add_argument("--text-model", default="ddalcu/Qwen3.8-27B-MLX-Serve-4bit", help="For --teacher mlx.")
     args = parser.parse_args()
     return args.run(args)
 

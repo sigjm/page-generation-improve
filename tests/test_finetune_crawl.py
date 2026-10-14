@@ -68,6 +68,8 @@ def test_product_page_fields():
     assert page.detail_images == [
         "https://www.kcdfshop.kr/web/upload/NNEditor/20261008/detail-1.jpg",
         "https://www.kcdfshop.kr/web/upload/NNEditor/20261008/detail-2.jpg",
+        # Products migrated from the old shop keep their detail images under the godomall path.
+        "https://www.kcdfshop.kr/web/kcdfonline1_godomall_com/data/editor/goods/210622/old-detail.jpg",
     ]
     assert page.spec == {
         "소재": "도자",
@@ -170,6 +172,7 @@ def test_crawl_stops_when_a_list_page_repeats_and_resumes(tmp_path):
     assert sorted(p.name for p in (tmp_path / "101").iterdir()) == [
         "detail-03.jpg",
         "detail-04.jpg",
+        "detail-05.jpg",
         "extra-01.jpg",
         "extra-02.jpg",
         "main-00.jpg",
@@ -186,3 +189,41 @@ def test_product_page_reads_the_artist_from_json_ld():
     page = parse_product_page((FIXTURES / "product.html").read_text(encoding="utf-8"))
 
     assert page.brand == "합성 작가"
+
+
+def test_crawl_repairs_products_missing_detail_images(tmp_path):
+    import json
+
+    from detail_page_ai.finetune.crawl import crawl_shop
+
+    list_html = (FIXTURES / "list.html").read_bytes()
+    product_html = (FIXTURES / "product.html").read_bytes()
+
+    def opener(url, user_agent, timeout):
+        if "list.html" in url:
+            return list_html
+        if "/product/" in url and "/category/" in url:
+            return product_html
+        return b"image-bytes"
+
+    def fetcher():
+        return PoliteFetcher(base_url="https://www.kcdfshop.kr", robots_txt=KCDF_ROBOTS, user_agent="ua", min_interval=0, opener=opener)
+
+    crawl_shop(tmp_path, fetcher(), categories={"578": "전체"}, log=lambda _: None)
+    product = tmp_path / "101"
+    record = json.loads((product / "record.json").read_text(encoding="utf-8"))
+    # As written by the old parser: no godomall detail image.
+    record["page"]["detail_images"] = record["page"]["detail_images"][:2]
+    record["images"]["detail"] = ["detail-03.jpg", "detail-04.jpg"]
+    (product / "record.json").write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    (product / "detail-05.jpg").unlink()
+    (product / "ocr.json").write_text("{}", encoding="utf-8")
+    (product / "structured.json").write_text("{}", encoding="utf-8")
+
+    crawl_shop(tmp_path, fetcher(), categories={"578": "전체"}, log=lambda _: None)
+
+    repaired = json.loads((product / "record.json").read_text(encoding="utf-8"))
+    assert repaired["images"]["detail"] == ["detail-03.jpg", "detail-04.jpg", "detail-05.jpg"]
+    assert len(repaired["page"]["detail_images"]) == 3
+    assert (product / "detail-05.jpg").read_bytes() == b"image-bytes"
+    assert not (product / "ocr.json").exists() and not (product / "structured.json").exists()

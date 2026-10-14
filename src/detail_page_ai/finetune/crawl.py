@@ -180,7 +180,9 @@ def parse_product_page(page: str) -> ProductPage:
 
     detail_images: list[str] = []
     for src in re.findall(r'<img[^>]+?(?:ec-data-src|src)="([^"]+)"', detail):
-        if "/web/upload/" in src and _absolute(src) not in detail_images:
+        # Same-site files only: /web/upload/ (editor uploads) and /web/<old-shop>/data/editor/
+        # (products migrated from the previous shop). External hosts and data: URIs are skipped.
+        if src.startswith("/web/") and _absolute(src) not in detail_images:
             detail_images.append(_absolute(src))
 
     spec: dict[str, str] = {}
@@ -206,6 +208,31 @@ def parse_product_page(page: str) -> ProductPage:
         notice=notice,
         brand=brand.group(1).strip() if brand else "",
     )
+
+
+def _repair_detail_images(product_dir: Path, image_fetcher: "PoliteFetcher", log: Callable[[str], None]) -> None:
+    """Fetch detail images an older parser missed, and drop the OCR and structuring built without them."""
+    record_path = product_dir / "record.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    page = parse_product_page((product_dir / "page.html").read_text(encoding="utf-8"))
+    missing = [url for url in page.detail_images if url not in record["page"].get("detail_images", [])]
+    if not missing:
+        return
+    index = 1 + max((int(name.split("-")[1].split(".")[0]) for names in record["images"].values() for name in names), default=-1)
+    for url in missing:
+        name = f"detail-{index:02d}{Path(urllib.parse.urlsplit(url).path).suffix.lower() or '.jpg'}"
+        try:
+            (product_dir / name).write_bytes(image_fetcher.get(url))
+        except (RobotsDisallowed, OSError) as exc:
+            log(f"{product_dir.name}: skip {url}: {exc}")
+            continue
+        record["images"]["detail"].append(name)
+        index += 1
+    record["page"] = asdict(page)
+    record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    for stale in ("ocr.json", "structured.json"):
+        (product_dir / stale).unlink(missing_ok=True)
+    log(f"{product_dir.name}: repaired {len(missing)} detail images")
 
 
 def crawl_shop(
@@ -240,6 +267,7 @@ def crawl_shop(
     for product_id, (path, category) in list(seen.items())[:limit]:
         product_dir = out_dir / product_id
         if (product_dir / "record.json").exists():
+            _repair_detail_images(product_dir, image_fetcher, log)
             done += 1
             continue
         product_dir.mkdir(parents=True, exist_ok=True)
