@@ -424,22 +424,44 @@ def _normalize_statement(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).split()).rstrip(" .!?。！？")
 
 
+def _compact(value: str) -> str:
+    return re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", value))
+
+
+def is_grounded_copy(item, user_hints: UserHintsDto | None) -> bool:
+    """Seen in the photo, or written by the artisan (found in user_hints, ignoring spacing)."""
+    evidence = getattr(item, "evidence", "image-visible")
+    if evidence == "image-visible":
+        return True
+    if evidence != "creator-provided" or user_hints is None:
+        return False
+    creator = _compact(" ".join(filter(None, [
+        user_hints.product_name, user_hints.making_method, user_hints.care_guide,
+    ])))
+    statement = _compact(item.description)
+    return bool(statement) and statement in creator
+
+
 def sanitize_profile_for_render(
     profile: ProductProfileDto, *, user_hints: UserHintsDto | None = None,
 ) -> ProductProfileDto:
     """Keep uncertain model claims out of customer-facing selling copy."""
     safe_features = [
-        feature for feature in profile.features if feature.evidence == "image-visible"
+        feature for feature in profile.features if is_grounded_copy(feature, user_hints)
     ]
     safe_copy_sections = [
         section
         for section in profile.copy_sections
-        if section.evidence == "image-visible"
+        if is_grounded_copy(section, user_hints)
     ]
     rejected = [
-        f"검증되지 않은 AI 추정 문구 제외: {item.title}"
+        (
+            f"장인 입력에서 확인되지 않는 문구 제외: {item.title}"
+            if item.evidence == "creator-provided"
+            else f"검증되지 않은 AI 추정 문구 제외: {item.title}"
+        )
         for item in [*profile.features, *profile.copy_sections]
-        if getattr(item, "evidence", "image-visible") != "image-visible"
+        if not is_grounded_copy(item, user_hints)
     ]
     confirmed = _seller_confirmed_statements(user_hints)
     instructions = _seller_instruction_statements(user_hints)
