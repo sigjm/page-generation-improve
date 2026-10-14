@@ -16,7 +16,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from detail_page_ai.finetune.crawl import SHOP, PoliteFetcher, ProductPage, crawl_shop
+from detail_page_ai.finetune.crawl import SHOP, PoliteFetcher, ProductPage, crawl_shop, parse_product_page
 from detail_page_ai.finetune.gold import (
     Structured,
     clean_ocr_lines,
@@ -89,6 +89,11 @@ def ocr(args: argparse.Namespace) -> int:
     return 0
 
 
+def _page(product_dir: Path) -> ProductPage:
+    """Parse the saved HTML again, so parser fixes apply without re-crawling."""
+    return parse_product_page((product_dir / "page.html").read_text(encoding="utf-8"))
+
+
 def ocr_lines(product_dir: Path) -> list[str]:
     per_image = json.loads((product_dir / "ocr.json").read_text(encoding="utf-8"))["per_image"]
     return join_sentences(clean_ocr_lines([line for lines in per_image.values() for line in lines]))
@@ -100,8 +105,7 @@ def structure(args: argparse.Namespace) -> int:
     client = MlxServeChatClient(base_url=args.text_url, model=args.text_model, timeout=600)
     done = 0
     for product_dir in _products(args.root, "ocr.json", "structured.json"):
-        record = json.loads((product_dir / "record.json").read_text(encoding="utf-8"))
-        page = ProductPage(**record["page"])
+        page = _page(product_dir)
         lines = ocr_lines(product_dir)
         out = product_dir / "structured.json"
         if sum("가" <= ch <= "힣" for ch in "".join(lines)) < MIN_OCR_HANGUL:
@@ -219,7 +223,7 @@ def build(args: argparse.Namespace) -> int:
         stats[f"{kind}:{split}"] += 1
 
     for product_id, (product_dir, record, structured, per_image) in products.items():
-        page = ProductPage(**record["page"])
+        page = _page(product_dir)
         category = record["category"]
         if not record["images"]["main"] or not (page.spec.get("소재") or page.spec.get("용도")):
             stats["skip:no-main-or-spec"] += 1

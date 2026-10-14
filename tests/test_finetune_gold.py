@@ -262,3 +262,10 @@ def test_usage_lives_in_the_usage_block_not_a_copy_section():
     assert "usage" not in [section.section_type for section in profile.copy_sections]
     assert profile.usage_scene == "책상 위 소품을 담아 두기 좋습니다."
     assert [block.block_type for block in profile.page_plan] == ["hero", "usage_scene", "closing"]
+
+
+def test_ocr_typos_do_not_pass_as_grounded():
+    source = ["곁을 은은하게 밝혀주는 호롱으로 완성했습니다."]
+
+    assert grounded("곁을 은은하게 밝혀주는 호롱으로 완성했습니다", source)
+    assert not grounded("고측을 은은하게 밝혀주는 호롱으로 완성했습니다.", source)

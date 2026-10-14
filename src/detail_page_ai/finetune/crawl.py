@@ -175,6 +175,7 @@ def parse_product_page(page: str) -> ProductPage:
     detail_start = page.find('id="prdDetail"')
     detail_end = page.find('id="prdInfo"', detail_start)
     detail = page[detail_start:detail_end if detail_end > 0 else None] if detail_start >= 0 else ""
+    detail = re.sub(r"<!--.*?-->", " ", detail, flags=re.S)
 
     detail_images: list[str] = []
     for src in re.findall(r'<img[^>]+?(?:ec-data-src|src)="([^"]+)"', detail):
@@ -189,11 +190,10 @@ def parse_product_page(page: str) -> ProductPage:
             if key in SPEC_FIELDS and key not in spec:
                 spec[key] = _text(value)
 
-    notice = ""
-    notice_at = detail.find("유의사항")
-    if notice_at >= 0:
-        end = detail.find("상품상세정보", notice_at)
-        notice = _text(detail[notice_at:end if end > 0 else None]).removeprefix("유의사항").strip()
+    # The tab bar also says 유의사항, so read after the last heading before the spec table.
+    before_spec = detail[:spec_at] if spec_at >= 0 else detail
+    notice_at = before_spec.rfind("유의사항")
+    notice = _text(before_spec[notice_at + len("유의사항"):]) if notice_at >= 0 else ""
 
     return ProductPage(
         name=name,

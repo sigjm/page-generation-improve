@@ -5,7 +5,6 @@ A model may only *sort* OCR sentences into roles; every sentence it returns
 must be found in the OCR text, and short labels may use only words found there.
 """
 
-import difflib
 import re
 from typing import Any, Mapping, Sequence
 
@@ -109,20 +108,13 @@ def hint_lines(hints: UserHintsDto) -> list[str]:
     return [line for line in lines if line]
 
 
-def grounded(text: str, source: Sequence[str], threshold: float = 0.9) -> bool:
-    """True when ``text`` appears (almost) verbatim in the source lines."""
+def grounded(text: str, source: Sequence[str]) -> bool:
+    """True when ``text`` appears in the source lines, ignoring spaces and punctuation.
+
+    No fuzzy matching: an OCR typo ("고측" for "곁을") must not pass as the seller's words.
+    """
     target = _norm(text)
-    corpus = _norm("".join(source))
-    if not target:
-        return False
-    if target in corpus:
-        return True
-    size = len(target)
-    step = max(1, size // 4)
-    for start in range(0, max(1, len(corpus) - size + 1), step):
-        if difflib.SequenceMatcher(None, target, corpus[start:start + size]).ratio() >= threshold:
-            return True
-    return False
+    return bool(target) and target in _norm("".join(source))
 
 
 def grounded_label(text: str, source: Sequence[str]) -> bool:
