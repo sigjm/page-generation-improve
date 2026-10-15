@@ -27,12 +27,14 @@ Status = Literal[
     "FAILED",
 ]
 LayoutId = Literal["editorial-split", "image-first", "catalog-grid"]
+# creator-provided: taken from the artisan's input (user_hints), not seen in the photo.
+Evidence = Literal["image-visible", "creator-provided", "inferred", "unknown"]
 
 
 class ProductFeatureDto(BaseModel):
     title: str = Field(min_length=1, max_length=80)
     description: str = Field(min_length=1, max_length=300)
-    evidence: Literal["image-visible", "inferred", "unknown"] = "image-visible"
+    evidence: Evidence = "image-visible"
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
@@ -40,7 +42,7 @@ class CopySectionDto(BaseModel):
     section_type: Literal["hero", "benefit", "feature", "usage", "closing"]
     title: str = Field(min_length=1, max_length=80)
     description: str = Field(min_length=1, max_length=300)
-    evidence: Literal["image-visible", "inferred", "unknown"] = "image-visible"
+    evidence: Evidence = "image-visible"
 
 
 PageBlockType = Literal[
@@ -74,7 +76,7 @@ class PageBlockItemDto(BaseModel):
     label: str = Field(min_length=1, max_length=80)
     value: str = Field(default="", max_length=180)
     description: str = Field(default="", max_length=300)
-    evidence: Literal["image-visible", "inferred", "unknown"] = "image-visible"
+    evidence: Evidence = "image-visible"
 
 
 class PageBlockDto(BaseModel):
@@ -223,7 +225,10 @@ class ApprovedDraftDto(BaseModel):
             hero_headline=hero.title if hero else "이미지에서 발견한 제품의 특징",
             hero_description=hero.description if hero else profile.summary,
             usage_scene=profile.usage_scene,
-            features=[feature for feature in profile.features if feature.evidence == "image-visible"][:3],
+            features=[
+                feature for feature in profile.features
+                if feature.evidence in {"image-visible", "creator-provided"}
+            ][:3],
             keywords=profile.keywords,
             layout_id=profile.layout_id,
             page_plan=profile.page_plan,

@@ -167,12 +167,14 @@ BE → AI  승인된 draft + 원본 사진
 
 ```text
 모델 출력의 특징 · 카피마다 근거 표시
-  image-visible  사진에서 보임
-  inferred       추정
-  unknown        알 수 없음
+  image-visible     사진에서 보임
+  creator-provided  장인 입력(user_hints)에서 가져옴
+  inferred          추정
+  unknown           알 수 없음
 
 렌더 전 정리 (validation.sanitize_profile_for_render)
-  → 고객용 features · copy_sections 는 image-visible 만 통과
+  → 고객용 features · copy_sections 는 image-visible, 그리고 설명 문장이 user_hints 에
+    실제로 있는 creator-provided 만 통과 (공백 · 문장부호 무시)
   → 나머지는 "검증되지 않은 AI 추정 문구 제외: …"로 기록
   → 그 기록과 불확실 정보는 user_hints 로 확인되지 않을 때만 '확인 필요' 항목(최대 12개)으로 남김
 ```
