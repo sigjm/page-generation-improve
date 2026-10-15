@@ -88,7 +88,12 @@ def turn_samples(row: dict[str, Any]) -> list[dict[str, Any]]:
     train only its final ``finish`` call.
     """
     messages = row["messages"]
+    turn_tools = row.get("turn_tools")
     return [
-        {"id": f"{row['id']}-t{turn}" if "id" in row else f"t{turn}", "messages": messages[: index + 1], "tools": row["tools"]}
+        {
+            "id": f"{row['id']}-t{turn}" if "id" in row else f"t{turn}",
+            "messages": messages[: index + 1],
+            "tools": turn_tools[turn] if turn_tools else row["tools"],
+        }
         for turn, index in enumerate(i for i, message in enumerate(messages) if message["role"] == "assistant")
     ]

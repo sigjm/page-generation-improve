@@ -49,8 +49,10 @@ class ScriptClient:
     def chat_with_tools(self, messages, tools):
         self.requests.append(([dict(message) for message in messages], tools))
         name, arguments = self.calls.pop(0)
+        while callable(arguments) and (resolved := arguments(messages)) is None:
+            name, arguments = self.calls.pop(0)  # a conditional call that does not apply here
         if callable(arguments):
-            arguments = arguments(messages)
+            arguments = resolved
         reply = {
             "content": "",
             "tool_calls": [{
@@ -96,7 +98,8 @@ class ScriptClient:
                     for call in message["tool_calls"]
                 ]}
             conversation.append(message)
-        return {"messages": conversation, "tools": tools}
+        # turn_tools[k] is the tool list offered for the k-th assistant turn; it shrinks as tools hit their caps.
+        return {"messages": conversation, "tools": tools, "turn_tools": [offered for _, offered in self.requests]}
 
 
 class GoldAnalyzer:
@@ -200,16 +203,7 @@ def draft_conversation(
     if recover == "bad_layout":
         calls.append(("plan_page", {"layout_id": "bento-grid"}))
     calls.append(("plan_page", {}))
-    parts = [
-        f"{profile.display_name or profile.product_type} 초안: 블록 {len(profile.page_plan)}개"
-        f"({', '.join(block.block_type for block in profile.page_plan)})",
-        f"장인 입력으로 확인한 문구 {len(profile.copy_sections)}개",
-    ]
-    if revise:
-        parts.append("근거가 부족했던 특징 1개를 장인 입력으로 확인")
-    if inspect:
-        parts.append("추가 사진 1장을 확인")
-    calls.append(("finish", {"summary": ". ".join(parts) + "."}))
+    calls.append(("finish", _draft_finish))
     client = ScriptClient(calls, json_replies, judge=judge)
     agent = _agent(client, GoldAnalyzer(analysis))
     agent.create_draft(
@@ -229,11 +223,36 @@ def draft_conversation(
     return row
 
 
-def _retry_photo_id(messages: list[dict]) -> str:
-    """A real photo id from prepare_photos, preferring one that is not the hero."""
-    photos = next(r.get("photos", []) for name, r in _tool_results(messages) if name == "prepare_photos")
-    ids = [photo["photo_id"] for photo in photos]
-    return next((photo_id for photo_id in ids if photo_id != "hero"), ids[0])
+AI_PHOTO_MODES = {"generated_scene", "generated_view"}  # the only photos the render prompt says to inspect
+
+
+def _ai_photo_id(messages: list[dict]) -> str | None:
+    """The first AI-generated photo that survived verify_photos, or None when there is none to inspect."""
+    results = _tool_results(messages)
+    photos = next(r.get("photos", []) for name, r in results if name == "prepare_photos")
+    removed = set(next((r.get("removed", []) for name, r in results if name == "verify_photos"), []))
+    return next(
+        (photo["photo_id"] for photo in photos if photo["asset_mode"] in AI_PHOTO_MODES and photo["photo_id"] not in removed),
+        None,
+    )
+
+
+def _draft_finish(messages: list[dict]) -> dict[str, Any]:
+    """The draft summary, from what the tools actually returned (plan_page fills in blocks)."""
+    results = [(name, r) for name, r in _tool_results(messages) if "error" not in r]
+    last = {name: r for name, r in results}
+    analysis = last.get("analyze_photos", {})
+    blocks = [entry.split(":")[-1] for entry in last.get("plan_page", {}).get("blocks", [])]
+    ungrounded = last.get("check_copy_grounding", {}).get("ungrounded", [])
+    parts = [f"{analysis.get('display_name') or analysis.get('product_type')} 초안: 블록 {len(blocks)}개({', '.join(blocks)})"]
+    if "revise_copy" in last:
+        parts.append(f"근거가 부족해 다시 확인한 문구 {len(last['revise_copy'].get('applied', []))}개")
+        ungrounded = last["revise_copy"].get("still_ungrounded", [])
+    parts.append(f"근거 없는 문구 {len(ungrounded)}개" if ungrounded else "고객용 문구는 모두 근거 확인")
+    photos = sum(1 for name, _ in results if name == "inspect_photo")
+    if photos:
+        parts.append(f"추가 사진 {photos}장을 확인")
+    return {"summary": ". ".join(parts) + "."}
 
 
 def _render_finish(messages: list[dict]) -> dict[str, Any]:
@@ -261,11 +280,12 @@ def render_conversation(
     approved = runtime_draft(profile, hints)
     calls: list[Call] = [("prepare_photos", {}), ("verify_photos", {})]
     if judge is not None:
-        # A section name used as a photo id: the tool error lists the real ids, then a valid retry.
+        # Only when an AI photo exists: a section name used as its id, the tool error listing the
+        # real ids, then the retry. Qwen-Image (generate-only) never yields one, so no inspect_image.
         wrong = next(block.section_id for block in approved.page_plan if block.block_type != "hero")
         calls += [
-            ("inspect_image", {"photo_id": wrong, "question": INSPECT_IMAGE_QUESTION}),
-            ("inspect_image", lambda messages: {"photo_id": _retry_photo_id(messages), "question": INSPECT_IMAGE_QUESTION}),
+            ("inspect_image", lambda m: {"photo_id": wrong, "question": INSPECT_IMAGE_QUESTION} if _ai_photo_id(m) else None),
+            ("inspect_image", lambda m: {"photo_id": photo_id, "question": INSPECT_IMAGE_QUESTION} if (photo_id := _ai_photo_id(m)) else None),
         ]
     calls.append(("render_page", {}))
     if judge is not None:

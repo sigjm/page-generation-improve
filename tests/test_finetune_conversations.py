@@ -217,22 +217,23 @@ def test_draft_can_inspect_an_extra_photo_with_the_judge():
     assert "추가 사진" in json.loads(json.dumps(row["messages"][-1]["tool_calls"][0]["function"]["arguments"]))["summary"]
 
 
-def test_render_with_the_judge_recovers_from_a_wrong_photo_id_and_stops_at_the_cap():
+def _render_with(photo_modes: dict[str, str], judge):
     from detail_page_ai.finetune.conversations import render_conversation
     from detail_page_ai.models import GeneratedImage, GeneratedSection, ProductPhoto, ProductPhotoSet
 
     image = png()
 
-    def photo(photo_id):
+    def photo(photo_id, mode):
         return ProductPhoto(
-            photo_id=photo_id, order=1, label=photo_id, data=image, mime_type="image/png",
-            asset_mode="source_original" if photo_id == "hero" else "source",
-            source_sha256=hashlib.sha256(image).hexdigest(), product_generated=False, fidelity_status="VERIFIED",
+            photo_id=photo_id, order=1, label=photo_id, data=image, mime_type="image/png", asset_mode=mode,
+            source_sha256=hashlib.sha256(image).hexdigest(), product_generated=mode.startswith("generated"),
+            background_generated=mode.startswith("generated"),
+            fidelity_status="GENERATED" if mode.startswith("generated") else "VERIFIED",
         )
 
     class Photos:
         def generate(self, **kwargs):
-            return ProductPhotoSet(photos=(photo("hero"), photo("packshot")))
+            return ProductPhotoSet(photos=tuple(photo(photo_id, mode) for photo_id, mode in photo_modes.items()))
 
     class Renderer:
         def render(self, **kwargs):
@@ -242,18 +243,27 @@ def test_render_with_the_judge_recovers_from_a_wrong_photo_id_and_stops_at_the_c
             )
             return GeneratedImage(data=image, mime_type="image/png", photos=kwargs["photo_set"].photos, sections=sections)
 
-    row = render_conversation(gold(), HINTS, image, "image/png", photo_generator=Photos(), renderer=Renderer(), judge=FakeJudge(problem_on_call=3))
+    return render_conversation(gold(), HINTS, image, "image/png", photo_generator=Photos(), renderer=Renderer(), judge=judge)
 
-    assert tool_names(row["messages"]) == [
-        "prepare_photos", "verify_photos", "inspect_image", "inspect_image",
-        "render_page", "inspect_render", "inspect_render", "finish",
-    ]
-    tool_results = [m["content"] for m in row["messages"] if m["role"] == "tool"]
-    assert "없는 photo_id" in tool_results[2] and "packshot" in tool_results[2]
+
+def test_render_without_ai_photos_skips_inspect_image_and_stops_at_the_inspect_render_cap():
+    # The render prompt reserves inspect_image for generated_scene/generated_view photos.
+    row = _render_with({"hero": "source_original", "packshot": "source"}, FakeJudge(problem_on_call=2))
+
+    assert tool_names(row["messages"]) == ["prepare_photos", "verify_photos", "render_page", "inspect_render", "inspect_render", "finish"]
     finish = row["messages"][-1]["tool_calls"][0]["function"]["arguments"]
     assert finish["warnings"] == ["statement: 글자 넘침이 보입니다."]
     assert "섹션 2개" in finish["summary"]
 
+
+def test_render_with_an_ai_photo_recovers_from_a_wrong_photo_id():
+    row = _render_with({"hero": "source_original", "packshot": "source", "lifestyle": "generated_scene"}, FakeJudge())
+
+    assert tool_names(row["messages"])[:4] == ["prepare_photos", "verify_photos", "inspect_image", "inspect_image"]
+    tool_results = [m["content"] for m in row["messages"] if m["role"] == "tool"]
+    assert "없는 photo_id" in tool_results[2] and "lifestyle" in tool_results[2]
+    retry = [m for m in row["messages"] if m["role"] == "assistant"][3]["tool_calls"][0]["function"]["arguments"]
+    assert retry["photo_id"] == "lifestyle"
 
 def test_judge_answers_that_misquote_the_product_text_are_rejected():
     from detail_page_ai.finetune.export import judged_ok
@@ -306,3 +316,33 @@ def test_inspect_and_revise_in_one_draft_each_get_their_own_answer():
     assert not any('"error"' in m["content"] for m in row["messages"] if m["role"] == "tool")
     assert [r["reply"]["evidence"] for r in row["judge_examples"]] == ["image-visible"]
     assert judge.calls == 1
+
+
+def test_every_turn_keeps_the_tool_list_it_was_offered():
+    # The runtime drops tools that hit their call cap, so the last request's list is not every turn's list.
+    from detail_page_ai.finetune.export import turn_samples
+
+    row = draft_conversation(gold(), HINTS, png(), "image/png", recover="bad_layout", revise=True)
+
+    assistants = [m for m in row["messages"] if m["role"] == "assistant"]
+    assert len(row["turn_tools"]) == len(assistants)
+    for message, tools in zip(assistants, row["turn_tools"]):
+        offered = {tool["function"]["name"] for tool in tools}
+        assert message["tool_calls"][0]["function"]["name"] in offered
+    for sample, tools in zip(turn_samples(row), row["turn_tools"]):
+        assert sample["tools"] == tools
+
+
+def test_draft_summary_reports_what_the_tools_returned():
+    row = draft_conversation(gold(), HINTS, png(), "image/png", revise=True, recover="bad_layout")
+
+    results = {}
+    names = {c["id"]: c["function"]["name"] for m in row["messages"] if m["role"] == "assistant" for c in m.get("tool_calls", [])}
+    for m in row["messages"]:
+        if m["role"] == "tool":
+            results[names[m["tool_call_id"]]] = json.loads(m["content"])
+    summary = row["messages"][-1]["tool_calls"][0]["function"]["arguments"]["summary"]
+    blocks = results["plan_page"]["blocks"]
+    assert f"블록 {len(blocks)}개" in summary
+    assert blocks[0].split(":")[1] in summary
+    assert "다시 확인한 문구 1개" in summary
