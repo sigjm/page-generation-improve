@@ -65,6 +65,7 @@ class UsageSceneGenerator(Protocol):
         source_mime_type: str,
         width: int,
         height: int,
+        direction: str | None = None,
     ) -> bytes:
         ...
 
@@ -81,6 +82,7 @@ class DetailViewGenerator(Protocol):
         source_mime_type: str,
         width: int,
         height: int,
+        direction: str | None = None,
     ) -> bytes:
         ...
 
@@ -1066,6 +1068,39 @@ class SourcePreservingProductPhotoGenerator:
             photo_generation_failures=tuple(photo_generation_failures),
         )
 
+    def regenerate_role(
+        self,
+        *,
+        photo: ProductPhoto,
+        source_image: bytes,
+        source_mime_type: str,
+        profile: ProductProfileDto,
+        direction: str | None = None,
+    ) -> tuple[ProductPhoto | None, tuple[PhotoGenerationFailure, ...]]:
+        """Generate one AI photo again in the same slot.
+
+        Source-preserved photos are refused: their pixels must never be redrawn.
+        """
+        if photo.asset_mode not in {"generated_scene", "generated_view"}:
+            raise ValueError("only AI-generated photos can be regenerated")
+        source_record = self.asset_store.put(source_image, source_mime_type, "source")
+        failures: list[PhotoGenerationFailure] = []
+        arguments = dict(
+            profile=profile,
+            order=photo.order,
+            source_asset_id=source_record.asset_id,
+            source_sha256=source_record.sha256,
+            source_image=source_image,
+            source_mime_type=source_mime_type,
+            photo_generation_failures=failures,
+            direction=direction,
+        )
+        if photo.asset_mode == "generated_scene":
+            regenerated = self._generated_usage_scene(photo_id=photo.photo_id, **arguments)
+        else:
+            regenerated = self._generated_detail_view(role=photo.photo_id, **arguments)
+        return regenerated, tuple(failures)
+
     def _generated_usage_scene(
         self,
         *,
@@ -1077,6 +1112,7 @@ class SourcePreservingProductPhotoGenerator:
         source_image: bytes,
         source_mime_type: str,
         photo_generation_failures: list[PhotoGenerationFailure],
+        direction: str | None = None,
     ) -> ProductPhoto | None:
         if self.usage_scene_generator is None:
             return None
@@ -1088,6 +1124,7 @@ class SourcePreservingProductPhotoGenerator:
                 source_mime_type=source_mime_type,
                 width=self.canvas_size[0],
                 height=self.canvas_size[1],
+                **({"direction": direction} if direction else {}),
             )
             image = _decode_rgb(data)
         except (RuntimeError, ValueError, OSError) as exc:
@@ -1128,6 +1165,7 @@ class SourcePreservingProductPhotoGenerator:
         source_image: bytes,
         source_mime_type: str,
         photo_generation_failures: list[PhotoGenerationFailure],
+        direction: str | None = None,
     ) -> ProductPhoto | None:
         if self.detail_view_generator is None:
             return None
@@ -1139,6 +1177,7 @@ class SourcePreservingProductPhotoGenerator:
                 source_mime_type=source_mime_type,
                 width=self.canvas_size[0],
                 height=self.canvas_size[1],
+                **({"direction": direction} if direction else {}),
             )
             image = _decode_rgb(data)
         except (RuntimeError, ValueError, OSError) as exc:

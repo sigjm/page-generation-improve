@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Timer
 from typing import Protocol
@@ -42,6 +43,18 @@ class CapacityExceededError(RuntimeError):
 
 class DraftVersionConflictError(ValueError):
     """A stale editor tried to overwrite a newer draft revision."""
+
+
+class EditingDisabledError(RuntimeError):
+    """Raised when the pipeline cannot edit drafts (AGENT_MODE=pipeline)."""
+
+
+@dataclass(frozen=True, slots=True)
+class DraftEditOutcome:
+    draft: AiFeDraftResultDto
+    reply: str
+    changes: list[dict]
+    warnings: list[str]
 
 
 class JobExecutor(Protocol):
@@ -444,6 +457,38 @@ class DetailPageJobService:
 
         return self.repository.update(job_id, save).draft
 
+    def edit_draft(
+        self,
+        job_id: str,
+        instruction: str,
+        *,
+        expected_version: int,
+    ) -> DraftEditOutcome:
+        """Apply a creator's natural-language edit, then save it like a manual edit."""
+        edit = getattr(self.pipeline, "edit_draft", None)
+        if edit is None:
+            raise EditingDisabledError("Conversational editing requires AGENT_MODE=agent")
+        snapshot = self.repository.get(job_id)
+        if snapshot.draft is None or snapshot.draft_profile is None:
+            raise ValueError("Draft is not ready")
+        if snapshot.approval_state in {"IN_PROGRESS", "COMPLETED"} or snapshot.result is not None:
+            raise ValueError("Draft cannot be edited after approval started")
+        if snapshot.draft.version != expected_version:
+            raise DraftVersionConflictError("Draft version is stale")
+        result = edit(
+            draft=snapshot.draft.draft,
+            instruction=instruction,
+            source_images=((snapshot.source_image, snapshot.source_mime_type),)
+            + snapshot.additional_source_images,
+            user_hints=snapshot.user_hints,
+        )
+        saved = (
+            self.save_draft(job_id, result.draft, expected_version=expected_version)
+            if result.changes
+            else snapshot.draft
+        )
+        return DraftEditOutcome(saved, result.reply, result.changes, result.warnings)
+
     def get_backend(self, job_id: str) -> AiToBeStatusResponseDto:
         job = self.repository.get(job_id)
         if not job.product_id:
@@ -500,6 +545,7 @@ class DetailPageJobService:
                         request_id=job.request_id,
                         source_image=job.source_image,
                         source_mime_type=job.source_mime_type,
+                        additional_source_images=job.additional_source_images,
                         user_hints=job.user_hints,
                         source_asset_id=job.source_asset_id,
                         status_callback=pipeline_kwargs["status_callback"],

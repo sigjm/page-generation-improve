@@ -5,6 +5,10 @@ from .dto import CraftResearchDto, GenerationOptions, ProductProfileDto, UserHin
 from .models import GeneratedImage, ProductPhotoSet
 
 
+class ModelCallError(RuntimeError):
+    """A model call failed or returned output the service cannot use."""
+
+
 class BackendSink(Protocol):
     def persist(self, request, image: GeneratedImage):
         ...

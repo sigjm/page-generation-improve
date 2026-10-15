@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     local_image_timeout_seconds: float = Field(
         default=300.0, alias="LOCAL_IMAGE_TIMEOUT", gt=0
     )
+    # FLUX.2 klein is distilled to 4 steps; Qwen-Image 2.1 needs about 20.
+    local_image_steps: int = Field(default=4, alias="LOCAL_IMAGE_STEPS", ge=1, le=100)
     product_photo_generation: Literal["source"] = Field(
         default="source", alias="PRODUCT_PHOTO_GENERATION"
     )
@@ -117,6 +119,15 @@ class Settings(BaseSettings):
     )
     craft_confidence_threshold: float = Field(
         default=0.65, alias="CRAFT_CONFIDENCE_THRESHOLD", ge=0, le=1
+    )
+    agent_mode: Literal["agent", "pipeline"] = Field(
+        default="agent", alias="AGENT_MODE"
+    )
+    agent_max_tool_calls: int = Field(
+        default=15, alias="AGENT_MAX_TOOL_CALLS", ge=1, le=50
+    )
+    agent_timeout_seconds: float = Field(
+        default=600.0, alias="AGENT_TIMEOUT_SECONDS", gt=0
     )
 
 

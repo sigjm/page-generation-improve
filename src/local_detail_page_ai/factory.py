@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from detail_page_ai.agent.detail_page_agent import DetailPageAgent
 from detail_page_ai.assets import LocalFileAssetStore
 from detail_page_ai.backend_client import (
     DEFAULT_BACKEND_CALLBACK_PATH,
@@ -111,12 +112,14 @@ def build_service(settings) -> DetailPageJobService:
                 base_url=settings.local_image_url,
                 model=settings.local_image_model,
                 timeout=settings.local_image_timeout_seconds,
+                steps=getattr(settings, "local_image_steps", 4),
             )
         else:
             image_client = SglangImageClient(
                 base_url=settings.local_image_url,
                 model=settings.local_image_model,
                 timeout=settings.local_image_timeout_seconds,
+                steps=getattr(settings, "local_image_steps", 4),
             )
         background_generator = MlxServeBackgroundGenerator(image_client)
         usage_scene_generator = MlxServeUsageSceneGenerator(image_client)
@@ -154,35 +157,52 @@ def build_service(settings) -> DetailPageJobService:
         if settings.backend_url
         else _UnconfiguredBackend()
     )
-    return DetailPageJobService(
-        pipeline=DetailPagePipeline(
-            analyzer=analyzer,
-            photo_generator=photo_generator,
-            renderer=renderer,
-            backend=backend,
-            template_image=template_image,
-            generation_metadata=GenerationMetadataDto(
-                provider=settings.analysis_provider,
-                analysis_model=analysis_model,
-                image_model=image_model,
-                prompt_version=settings.prompt_version,
-            ),
-            outbox=outbox,
-            asset_store=asset_store,
-            response_asset_mode=getattr(settings, "response_asset_mode", "base64"),
-            craft_confidence_threshold=getattr(
-                settings, "craft_confidence_threshold", 0.65
-            ),
-            max_image_bytes=getattr(settings, "max_image_bytes", 10 * 1024 * 1024),
-            max_source_images=getattr(settings, "max_source_images", 12),
-            max_total_input_bytes=getattr(
-                settings, "max_request_bytes", 120 * 1024 * 1024
-            ),
-            max_pending_generations=getattr(settings, "max_pending_generations", 100),
-            require_decodable_images=getattr(
-                settings, "require_decodable_images", True
-            ),
+    agent_mode = getattr(settings, "agent_mode", "pipeline")
+    if agent_mode == "agent" and not hasattr(chat_client, "chat_with_tools"):
+        raise ValueError(
+            "AGENT_MODE=agent needs LOCAL_TEXT_PROVIDER mlx or sglang; "
+            "set AGENT_MODE=pipeline for ollama"
+        )
+    pipeline_kwargs = dict(
+        analyzer=analyzer,
+        photo_generator=photo_generator,
+        renderer=renderer,
+        backend=backend,
+        template_image=template_image,
+        generation_metadata=GenerationMetadataDto(
+            provider=settings.analysis_provider,
+            analysis_model=analysis_model,
+            image_model=image_model,
+            prompt_version=settings.prompt_version,
         ),
+        outbox=outbox,
+        asset_store=asset_store,
+        response_asset_mode=getattr(settings, "response_asset_mode", "base64"),
+        craft_confidence_threshold=getattr(
+            settings, "craft_confidence_threshold", 0.65
+        ),
+        max_image_bytes=getattr(settings, "max_image_bytes", 10 * 1024 * 1024),
+        max_source_images=getattr(settings, "max_source_images", 12),
+        max_total_input_bytes=getattr(
+            settings, "max_request_bytes", 120 * 1024 * 1024
+        ),
+        max_pending_generations=getattr(settings, "max_pending_generations", 100),
+        require_decodable_images=getattr(
+            settings, "require_decodable_images", True
+        ),
+    )
+    pipeline = (
+        DetailPageAgent(
+            chat_client=chat_client,
+            max_tool_calls=getattr(settings, "agent_max_tool_calls", 15),
+            timeout_seconds=getattr(settings, "agent_timeout_seconds", 600.0),
+            **pipeline_kwargs,
+        )
+        if agent_mode == "agent"
+        else DetailPagePipeline(**pipeline_kwargs)
+    )
+    return DetailPageJobService(
+        pipeline=pipeline,
         repository=repository,
         max_pending_generations=getattr(settings, "max_pending_generations", 100),
         max_image_bytes=getattr(settings, "max_image_bytes", 10 * 1024 * 1024),

@@ -26,7 +26,7 @@
 | 구성 요소 | 하는 일 | 실행 위치 |
 | --- | --- | --- |
 | AI API | 작업 접수, 상태 조회, 초안 저장, 승인 처리, 헬스 체크, 지표 노출 | FastAPI, 포트 8000 |
-| 생성 파이프라인 | 분석 → 사진 처리 → 합성 → 검증 → 렌더 → 전달을 순서대로 실행 | API와 같은 프로세스의 작업 스레드 |
+| 생성 에이전트 | 분석 → 사진 처리 → 검증 → 렌더 단계를 Qwen이 도구로 골라 실행. 끝내지 못한 단계는 기존 고정 순서로 채움 (`AGENT_MODE=pipeline`이면 고정 순서만) | API와 같은 프로세스의 작업 스레드 |
 | 텍스트 · 비전 모델 | 사진을 읽고 문구 초안과 페이지 구성을 만든다 | SGLang, 포트 30000, GPU |
 | 이미지 생성 모델 | 연출 배경과 보조 컷을 만든다 | SGLang, 포트 30001, GPU |
 | 누끼 | 원본 사진에서 제품만 잘라낸다 | rembg BiRefNet, CPU |
@@ -143,6 +143,7 @@ GPU를 나눠 쓰기 위한 설정값과 Stage에서 겪은 문제는 [README의
 | AI API | `src/detail_page_ai/app.py` |
 | 작업 접수 · 승인 · 재시도 예약 | `src/detail_page_ai/service.py` |
 | 생성 파이프라인 | `src/detail_page_ai/pipeline.py` |
+| 생성 에이전트 (루프 · 도구 · 프롬프트) | `src/detail_page_ai/agent/` |
 | 프롬프트, 입력 · 문구 검증 | `src/detail_page_ai/prompts.py`, `validation.py` |
 | 누끼 · 사진 영역 · 합성 · 보존 검증 | `src/detail_page_ai/source_photos.py` |
 | `react_document` 조립 · 검증 | `src/detail_page_ai/react_document_builder.py`, `react_document.py` |

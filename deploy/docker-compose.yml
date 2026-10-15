@@ -49,6 +49,7 @@ services:
       --mem-fraction-static ${TEXT_MEM_FRACTION:-0.50}
       --context-length ${TEXT_CONTEXT_LENGTH:-16384}
       --trust-remote-code
+      --tool-call-parser ${TEXT_TOOL_CALL_PARSER:-qwen3_coder}
     deploy:
       resources:
         reservations:

@@ -8,8 +8,10 @@ from io import BytesIO
 from typing import Any, Protocol
 from urllib import error, request
 
+from detail_page_ai.ports import ModelCallError
 
-class LocalModelError(RuntimeError):
+
+class LocalModelError(ModelCallError):
     """Raised when a local model server returns an unusable response."""
 
 
@@ -101,7 +103,12 @@ class UrllibJsonTransport:
         try:
             with request.urlopen(http_request, timeout=timeout) as response:
                 raw = response.read()
-        except (error.HTTPError, error.URLError, TimeoutError) as exc:
+        except error.HTTPError as exc:
+            # The status line alone ("400: Bad Request") hides why the server
+            # refused, e.g. MLX Serve's memory-admission "PrefillDoesNotFit".
+            reason = exc.read(500).decode("utf-8", "replace").strip()
+            raise LocalModelError(f"Local model request failed: {exc} {reason}".rstrip()) from exc
+        except (error.URLError, TimeoutError) as exc:
             raise LocalModelError(f"Local model request failed: {exc}") from exc
         try:
             payload = json.loads(raw.decode("utf-8"))
@@ -223,6 +230,54 @@ class MlxServeChatClient:
         if not content_text:
             raise LocalModelError("MLX Serve response has no message content")
         return _parse_json_object(content_text, provider="MLX Serve")
+
+    def chat_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Return one assistant turn as {"content": str, "tool_calls": [...]}.
+
+        Each tool call is {"id", "name", "arguments"}. Arguments stay a JSON
+        string so the agent loop can report malformed JSON back to the model.
+        """
+        response = self.transport.post(
+            f"{self.base_url}/v1/chat/completions",
+            {
+                "model": self.model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+                "stream": False,
+                "temperature": 0,
+                "max_tokens": self.max_tokens,
+            },
+            self.timeout,
+        )
+        choices = response.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        message = choice.get("message") if isinstance(choice, dict) else None
+        if not isinstance(message, dict):
+            raise LocalModelError("MLX Serve response has no message")
+        tool_calls = []
+        for index, call in enumerate(message.get("tool_calls") or []):
+            function = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get("arguments") or "{}"
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            tool_calls.append(
+                {
+                    "id": call.get("id") or f"call-{index}",
+                    "name": str(function.get("name") or ""),
+                    "arguments": arguments,
+                }
+            )
+        return {
+            "content": _message_content_text(message.get("content")),
+            "tool_calls": tool_calls,
+        }
 
 
 class MlxServeImageClient:

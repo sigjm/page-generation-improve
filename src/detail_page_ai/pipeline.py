@@ -27,7 +27,7 @@ from .dto import (
     ApprovedDraftDto,
     UserHintsDto,
 )
-from .models import GenerationOptions, ProductPhotoSet
+from .models import GeneratedImage, GenerationOptions, ProductPhotoSet
 from .leases import LeaseHeartbeat
 from .ports import (
     BackendSink,
@@ -54,6 +54,10 @@ from .validation import (
 
 class PendingGenerationNotFound(KeyError):
     """Raised when a BE delivery retry has no stored generation."""
+
+
+class ModelBusyError(RuntimeError):
+    """Raised when the shared model lock does not free up in time."""
 
 
 @dataclass(slots=True)
@@ -191,63 +195,27 @@ class DetailPagePipeline:
         emit("ANALYZING", 15)
         if profile_override is not None:
             profile = profile_override
+            validate_product_profile(profile)
         else:
-            if user_hints and user_hints.model_dump(exclude_none=True):
-                profile = self.analyzer.analyze(
-                    source_image,
-                    source_mime_type,
-                    user_hints=user_hints,
-                )
-            else:
-                profile = self.analyzer.analyze(source_image, source_mime_type)
-        validate_product_profile(profile)
-        if profile_override is None and self._should_research_craft(profile, user_hints) and self.researcher:
-            research_profile = profile
-            if not research_profile.craft_type:
-                research_profile = profile.model_copy(
-                    update={
-                        "craft_type": (
-                            profile.candidate_types[0]
-                            if profile.candidate_types
-                            else profile.product_type
-                        )
-                    }
-                )
-            if user_hints and user_hints.model_dump(exclude_none=True):
-                craft_research = self.researcher.research(
-                    research_profile,
-                    user_hints=user_hints,
-                )
-            else:
-                craft_research = self.researcher.research(research_profile)
-            profile = profile.model_copy(
-                update={
-                    "craft_type": craft_research.craft_type,
-                    "craft_research": craft_research,
-                }
+            profile = self._compose_profile(
+                source_image=source_image,
+                source_mime_type=source_mime_type,
+                additional_source_images=additional_source_images,
+                user_hints=user_hints,
+                status_callback=emit,
             )
-        if profile_override is None:
-            profile = ensure_editorial_page_plan(profile)
         profile = sanitize_profile_for_render(profile, user_hints=user_hints)
         approved_draft = ApprovedDraftDto.from_profile(profile)
         emit("EXTRACTING", 30)
-        emit("GENERATING_BACKGROUNDS", 45)
-        if self.photo_generator:
-            photo_arguments = {
-                "source_image": source_image,
-                "source_mime_type": source_mime_type,
-                "profile": profile,
-                "options": run_options,
-            }
-            if additional_source_images:
-                photo_arguments["additional_source_images"] = additional_source_images
-            photo_set = self.photo_generator.generate(**photo_arguments)
-        else:
-            photo_set = ProductPhotoSet()
-        emit("COMPOSING", 55)
-        emit("VERIFYING", 65)
         source_images = ((source_image, source_mime_type),) + additional_source_images
-        photo_set = self._validated_photo_set(photo_set, source_images)
+        photo_set, generated_image = self._produce_page(
+            source_image=source_image,
+            source_mime_type=source_mime_type,
+            additional_source_images=additional_source_images,
+            profile=profile,
+            options=run_options,
+            status_callback=emit,
+        )
         photo_generation_failures = [
             PhotoGenerationFailureDto(
                 photo_id=failure.photo_id,
@@ -255,15 +223,6 @@ class DetailPagePipeline:
             )
             for failure in photo_set.photo_generation_failures
         ]
-        emit("RENDERING", 75)
-        generated_image = self.renderer.render(
-            source_image=source_image,
-            source_mime_type=source_mime_type,
-            template_image=self.template_image,
-            profile=profile,
-            options=run_options,
-            photo_set=photo_set,
-        )
         if not generated_image.data:
             raise ValueError("Renderer returned empty image data")
 
@@ -516,6 +475,7 @@ class DetailPagePipeline:
         source_image: bytes,
         source_mime_type: str,
         *,
+        additional_source_images: tuple[tuple[bytes, str], ...] = (),
         user_hints: UserHintsDto | None = None,
         source_asset_id: str | None = None,
         status_callback: Callable[[str, int], None] | None = None,
@@ -532,7 +492,7 @@ class DetailPagePipeline:
             if status_callback is not None:
                 status_callback(status, progress)
 
-        self._validate_inputs(source_image, source_mime_type, ())
+        self._validate_inputs(source_image, source_mime_type, additional_source_images)
         if self.asset_store:
             stored_source = self.asset_store.put(source_image, source_mime_type, "source")
             resolved_source_asset_id = source_asset_id or stored_source.asset_id
@@ -540,37 +500,13 @@ class DetailPagePipeline:
             resolved_source_asset_id = source_asset_id
 
         emit("ANALYZING", 15)
-        if user_hints and user_hints.model_dump(exclude_none=True):
-            profile = self.analyzer.analyze(
-                source_image, source_mime_type, user_hints=user_hints
-            )
-        else:
-            profile = self.analyzer.analyze(source_image, source_mime_type)
-        validate_product_profile(profile)
-        if self._should_research_craft(profile, user_hints) and self.researcher:
-            research_profile = profile
-            if not research_profile.craft_type:
-                research_profile = profile.model_copy(
-                    update={
-                        "craft_type": (
-                            profile.candidate_types[0]
-                            if profile.candidate_types
-                            else profile.product_type
-                        )
-                    }
-                )
-            craft_research = self.researcher.research(
-                research_profile,
-                user_hints=user_hints,
-            ) if user_hints and user_hints.model_dump(exclude_none=True) else self.researcher.research(research_profile)
-            profile = profile.model_copy(
-                update={
-                    "craft_type": craft_research.craft_type,
-                    "craft_research": craft_research,
-                }
-            )
-
-        profile = ensure_editorial_page_plan(profile)
+        profile = self._compose_profile(
+            source_image=source_image,
+            source_mime_type=source_mime_type,
+            additional_source_images=additional_source_images,
+            user_hints=user_hints,
+            status_callback=emit,
+        )
         profile = sanitize_profile_for_render(profile, user_hints=user_hints)
         emit("EXTRACTING", 60)
         generation_id = generation_id or self.id_factory()
@@ -822,6 +758,138 @@ class DetailPagePipeline:
         if self.response_asset_mode == "url":
             return url, None
         return None, encoded
+
+    def _analyze(
+        self,
+        source_image: bytes,
+        source_mime_type: str,
+        user_hints: UserHintsDto | None,
+    ) -> ProductProfileDto:
+        if user_hints and user_hints.model_dump(exclude_none=True):
+            profile = self.analyzer.analyze(
+                source_image, source_mime_type, user_hints=user_hints
+            )
+        else:
+            profile = self.analyzer.analyze(source_image, source_mime_type)
+        validate_product_profile(profile)
+        return profile
+
+    def _research_if_needed(
+        self,
+        profile: ProductProfileDto,
+        user_hints: UserHintsDto | None,
+    ) -> ProductProfileDto:
+        if not (self.researcher and self._should_research_craft(profile, user_hints)):
+            return profile
+        research_profile = profile
+        if not research_profile.craft_type:
+            research_profile = profile.model_copy(
+                update={
+                    "craft_type": (
+                        profile.candidate_types[0]
+                        if profile.candidate_types
+                        else profile.product_type
+                    )
+                }
+            )
+        if user_hints and user_hints.model_dump(exclude_none=True):
+            craft_research = self.researcher.research(
+                research_profile, user_hints=user_hints
+            )
+        else:
+            craft_research = self.researcher.research(research_profile)
+        return profile.model_copy(
+            update={
+                "craft_type": craft_research.craft_type,
+                "craft_research": craft_research,
+            }
+        )
+
+    def _compose_profile(
+        self,
+        *,
+        source_image: bytes,
+        source_mime_type: str,
+        additional_source_images: tuple[tuple[bytes, str], ...],
+        user_hints: UserHintsDto | None,
+        status_callback: Callable[[str, int], None],
+    ) -> ProductProfileDto:
+        """Analyze, research and plan the page. DetailPageAgent overrides this step."""
+        del additional_source_images, status_callback  # the fixed steps read one photo
+        profile = self._analyze(source_image, source_mime_type, user_hints)
+        profile = self._research_if_needed(profile, user_hints)
+        return ensure_editorial_page_plan(profile)
+
+    def _generate_photos(
+        self,
+        *,
+        source_image: bytes,
+        source_mime_type: str,
+        additional_source_images: tuple[tuple[bytes, str], ...],
+        profile: ProductProfileDto,
+        options: GenerationOptions,
+    ) -> ProductPhotoSet:
+        if not self.photo_generator:
+            return ProductPhotoSet()
+        photo_arguments = {
+            "source_image": source_image,
+            "source_mime_type": source_mime_type,
+            "profile": profile,
+            "options": options,
+        }
+        if additional_source_images:
+            photo_arguments["additional_source_images"] = additional_source_images
+        return self.photo_generator.generate(**photo_arguments)
+
+    def _render_page(
+        self,
+        *,
+        source_image: bytes,
+        source_mime_type: str,
+        profile: ProductProfileDto,
+        options: GenerationOptions,
+        photo_set: ProductPhotoSet,
+    ) -> GeneratedImage:
+        return self.renderer.render(
+            source_image=source_image,
+            source_mime_type=source_mime_type,
+            template_image=self.template_image,
+            profile=profile,
+            options=options,
+            photo_set=photo_set,
+        )
+
+    def _produce_page(
+        self,
+        *,
+        source_image: bytes,
+        source_mime_type: str,
+        additional_source_images: tuple[tuple[bytes, str], ...],
+        profile: ProductProfileDto,
+        options: GenerationOptions,
+        status_callback: Callable[[str, int], None],
+    ) -> tuple[ProductPhotoSet, GeneratedImage]:
+        """Make the photos and render the page. DetailPageAgent overrides this step."""
+        status_callback("GENERATING_BACKGROUNDS", 45)
+        photo_set = self._generate_photos(
+            source_image=source_image,
+            source_mime_type=source_mime_type,
+            additional_source_images=additional_source_images,
+            profile=profile,
+            options=options,
+        )
+        status_callback("COMPOSING", 55)
+        status_callback("VERIFYING", 65)
+        source_images = ((source_image, source_mime_type),) + additional_source_images
+        photo_set = self._validated_photo_set(photo_set, source_images)
+        status_callback("RENDERING", 75)
+        return photo_set, self._render_page(
+            source_image=source_image,
+            source_mime_type=source_mime_type,
+            profile=profile,
+            options=options,
+            photo_set=photo_set,
+        )
 
     def _should_research_craft(
         self,
