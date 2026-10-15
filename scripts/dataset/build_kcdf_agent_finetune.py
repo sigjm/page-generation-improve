@@ -99,6 +99,32 @@ def ocr_lines(product_dir: Path) -> list[str]:
     return join_sentences(clean_ocr_lines([line for lines in per_image.values() for line in lines]))
 
 
+class _CachedImages:
+    """Same request, same picture (the server's default seed), so each prompt is drawn once.
+
+    Half the generations in a build repeat an earlier prompt; the cache lives on disk so a
+    resumed build keeps it.
+    """
+
+    def __init__(self, client, folder: Path):
+        self.client, self.folder = client, folder
+        folder.mkdir(parents=True, exist_ok=True)
+
+    def generate(self, prompt: str, *, negative_prompt: str = "", width: int = 1024, height: int = 1024) -> bytes:
+        import hashlib
+
+        request = json.dumps([self.client.model, self.client.steps, prompt, negative_prompt, width, height])
+        path = self.folder / f"{hashlib.sha256(request.encode()).hexdigest()}.png"
+        if path.exists():
+            return path.read_bytes()
+        data = self.client.generate(prompt, negative_prompt=negative_prompt, width=width, height=height)
+        path.write_bytes(data)
+        return data
+
+    def __getattr__(self, name):  # edit() and the rest go straight to the server
+        return getattr(self.client, name)
+
+
 def _teacher(args: argparse.Namespace):
     """The labeling model: Codex by default, or a local MLX Serve model."""
     if args.teacher == "codex":
@@ -230,7 +256,10 @@ def build(args: argparse.Namespace) -> int:
                 MlxServeUsageSceneGenerator,
             )
 
-            image_client = MlxServeImageClient(base_url=args.image_url, model=args.image_model, timeout=900, steps=args.image_steps)
+            image_client = _CachedImages(
+                MlxServeImageClient(base_url=args.image_url, model=args.image_model, timeout=900, steps=args.image_steps),
+                args.root / "image-cache",
+            )
             generators = {
                 "background_generator": MlxServeBackgroundGenerator(image_client),
                 "usage_scene_generator": MlxServeUsageSceneGenerator(image_client),
