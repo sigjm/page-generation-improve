@@ -79,3 +79,19 @@ FLUX.2 klein은 이 Mac에서 지워진 상태라 `ddalcu/Qwen-Image-2.1-MLX-Ser
   - Hugging Face 캐시의 `tokenizer.json`이 읽기 전용이면 프로세서 저장 단계에서 실패하고, 설정에 양자화 정보가 빠집니다. 캐시에 쓰기 권한을 준 뒤 다시 변환하면 됩니다.
 - 이미지 모델 로드 가능 여부는 그 시점 Mac의 여유 메모리에 따라 달라졌습니다(4B 때 33.9GB, 9B 때 13.8GB). Qwen-Image 8bit는 올릴 때 최대 21GB가 필요해서, 텍스트 모델과 안정적으로 함께 쓰려면 더 가벼운 이미지 모델(FLUX.2 klein 9B, 8.9GB)이 필요합니다.
 
+
+## 최종 구성 확인: 파인튜닝 9B + Qwen-Image 2.1 4bit (2026-10-15)
+
+최종 에이전트는 텍스트 `empero-ai/Qwen3.8-9B-Distill-MLX-4bit`(파인튜닝 후 병합)와 이미지 `ddalcu/Qwen-Image-2.1-MLX-Serve-4bit` 두 모델만 씁니다.
+
+### Qwen-Image 2.1 4bit
+- 디스크 10GB, 상주 15.5GB. 1024×1024 20단계 1장에 약 35초. 9B(약 6GB)와 합쳐 약 22GB라 64GB Mac에서 함께 올라갑니다.
+- `mlx-serve pull`은 최상위 파일 2개만 받고 하위 폴더(transformer, vae 등)를 빠뜨립니다. `hf download ddalcu/Qwen-Image-2.1-MLX-Serve-4bit --local-dir ~/.mlx-serve/models/ddalcu/Qwen-Image-2.1-MLX-Serve-4bit`로 받습니다. 서버는 시작할 때 모델 목록을 읽으므로 받은 뒤 다시 띄웁니다.
+- MLX Serve의 사전 메모리 점검이 macOS 비활성 메모리를 빼고 "가용 7.3GB"로 계산해 로드를 거절했습니다(시스템 여유 77%). `--skip-mem-preflight`로 띄웁니다.
+- 서비스는 `LOCAL_IMAGE_STEPS=20`이 필요합니다(PR #1에 설정 추가, 기본값 4).
+- 편집 모드가 없어 원본을 참조하는 AI 사용 장면·디테일 컷은 실패하고, 생성 배경에 원본을 합성한 사진으로 대체됩니다.
+
+### 파인튜닝 경로
+- mlx-vlm 0.7.8로 LoRA(rank 8) 학습, `scripts/dataset/fuse_lora.py`로 4bit에 병합(LoRA 248개 레이어, 5.6GB 그대로). MLX Serve가 병합 폴더를 `tool_use`, `vision` 모델로 읽습니다.
+- 학습 메모리: 분석 행(약 10,700토큰) 최대 43.6GB, 그 밖의 행 19.4GB. 학습은 MLX Serve를 내리고 합니다.
+- 연결 확인: 짧은 행 20스텝으로 만든 어댑터를 병합해 `run_eval_pilot.py --agent-mode agent`로 1건 실행 → 성공(164초). 초안은 `analyze_photos → check_copy_grounding → revise_copy → plan_page → finish`로 오류 없이 끝났고, 렌더는 `inspect_render`를 상한(2회)보다 2번 더 불러 거절당한 뒤 끝났습니다. 20스텝짜리라 품질 판단용은 아닙니다.
