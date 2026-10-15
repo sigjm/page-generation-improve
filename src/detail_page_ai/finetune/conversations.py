@@ -130,6 +130,10 @@ def _agent(client: ScriptClient, analyzer, **components) -> DetailPageAgent:
         photo_generator=components.get("photo_generator"),
         backend=_NoBackend(),
         id_factory=lambda: "finetune",
+        # Wall-clock budgets are not in the transcript; recordings wait on queued image
+        # generation and teacher calls, so they get far more time than a live job.
+        timeout_seconds=7200.0,
+        edit_timeout_seconds=1800.0,
     )
 
 

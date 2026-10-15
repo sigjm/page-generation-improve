@@ -317,7 +317,11 @@ def build(args: argparse.Namespace) -> int:
         cached = cache / f"{product_id}-{'render' if render else 'norender'}.json"
         if cached.exists():
             return head + [tuple(row) for row in json.loads(cached.read_text(encoding="utf-8"))]
-        rows = fresh_conversations(job)
+        try:
+            rows = fresh_conversations(job)
+        except Exception as exc:  # noqa: BLE001 - one product must not stop the build; not cached, so retried
+            print(f"{product_id}: conversation failed, will retry on the next build: {exc}"[:300], flush=True)
+            return head + [("skip:conversation-error", "", {})]
         _write(cached, rows)
         return head + rows
 
