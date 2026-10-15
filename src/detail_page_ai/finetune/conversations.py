@@ -63,12 +63,13 @@ class ScriptClient:
         return reply
 
     def generate_json(self, prompt, *, image=None, mime_type=None, json_schema=None):
-        if self.json_replies:
-            reply, source = self.json_replies.pop(0), "script"
-        elif self.judge is not None:
+        # inspect_* prompts carry a <question>; everything else (revise_copy) is scripted.
+        if "<question>" in prompt and self.judge is not None:
             reply, source = self.judge.generate_json(prompt, image=image, mime_type=mime_type), "judge"
+        elif self.json_replies:
+            reply, source = self.json_replies.pop(0), "script"
         else:
-            raise AssertionError("no scripted reply or judge for this image question")
+            raise AssertionError("no scripted reply or judge for this request")
         self.json_requests.append({"prompt": prompt, "image": image, "mime_type": mime_type, "reply": reply, "source": source})
         return reply
 

@@ -279,3 +279,30 @@ def test_analysis_row_can_use_the_image_generation_prompt():
 
     assert "Generated usage-scene availability" in row["messages"][0]["content"][1]["text"]
     assert "Generated usage-scene availability" not in analysis_row("x.png", png(), gold(), HINTS)["messages"][0]["content"][1]["text"]
+
+
+def test_agent_rows_split_into_one_sample_per_assistant_turn():
+    # mlx-vlm's completion mask trains only the last assistant turn, so each turn needs its own sample.
+    from detail_page_ai.finetune.export import turn_samples
+
+    row = draft_conversation(gold(), HINTS, png(), "image/png")
+    samples = turn_samples(row)
+
+    turns = [m for m in row["messages"] if m["role"] == "assistant"]
+    assert len(samples) == len(turns) == 4
+    assert [s["messages"][-1] for s in samples] == turns
+    assert all(s["tools"] == row["tools"] for s in samples)
+    assert samples[1]["messages"] == row["messages"][: len(samples[1]["messages"])]
+
+
+def test_inspect_and_revise_in_one_draft_each_get_their_own_answer():
+    judge = FakeJudge()
+    row = draft_conversation(
+        gold(), HINTS, png(), "image/png", revise=True, extra_images=((png(), "image/png"),), judge=judge, inspect=True,
+    )
+
+    names = tool_names(row["messages"])
+    assert names == ["analyze_photos", "inspect_photo", "check_copy_grounding", "revise_copy", "plan_page", "finish"]
+    assert not any('"error"' in m["content"] for m in row["messages"] if m["role"] == "tool")
+    assert [r["reply"]["evidence"] for r in row["judge_examples"]] == ["image-visible"]
+    assert judge.calls == 1

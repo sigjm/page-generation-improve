@@ -79,3 +79,16 @@ def judged_ok(requests: list[dict], known: str = "") -> bool:
         return reply.get("evidence") in {"image-visible", "inferred"} or isinstance(reply.get("has_problem"), bool)
 
     return all(ok(request["reply"]) for request in requests)
+
+
+def turn_samples(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """One sample per assistant turn: the conversation up to and including that turn.
+
+    mlx-vlm masks everything before the last assistant message, so a whole conversation would
+    train only its final ``finish`` call.
+    """
+    messages = row["messages"]
+    return [
+        {"id": f"{row['id']}-t{turn}" if "id" in row else f"t{turn}", "messages": messages[: index + 1], "tools": row["tools"]}
+        for turn, index in enumerate(i for i, message in enumerate(messages) if message["role"] == "assistant")
+    ]

@@ -72,7 +72,7 @@ def _products(root: Path, needs: str, makes: str):
             yield product_dir
 
 
-def _write(path: Path, data: dict) -> None:
+def _write(path: Path, data: dict | list) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -308,9 +308,22 @@ def build(args: argparse.Namespace) -> int:
         jobs.append((product_id, category, hints, profile, image, image_name, extras, analysis, render))
 
     # 2) Agent conversations in parallel: the teacher's image answers and Qwen-Image photos are slow.
+    cache = out / "cache"  # one file per finished product, so an interrupted build resumes
+    cache.mkdir(exist_ok=True)
+
     def conversations(job) -> list[tuple[str, str, dict]]:
+        product_id, analysis, render = job[0], job[7], job[8]
+        head = [("analysis", "vlm", analysis)] if analysis else []
+        cached = cache / f"{product_id}-{'render' if render else 'norender'}.json"
+        if cached.exists():
+            return head + [tuple(row) for row in json.loads(cached.read_text(encoding="utf-8"))]
+        rows = fresh_conversations(job)
+        _write(cached, rows)
+        return head + rows
+
+    def fresh_conversations(job) -> list[tuple[str, str, dict]]:
         product_id, category, hints, profile, image, image_name, extras, analysis, render = job
-        rows = [("analysis", "vlm", analysis)] if analysis else []
+        rows = []
         known = "\n".join(hint_lines(hints))
         judged_images = 0
 
