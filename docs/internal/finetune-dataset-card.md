@@ -6,6 +6,17 @@
 - 교차 검토: `docs/internal/finetune-data-codex-review-1.md`, `docs/internal/finetune-data-codex-review-2.md`
 - 위치: `.local/finetune/kcdf/` (git 제외). **재배포 금지**
 
+## 현재 빌드 (2026-10-15)
+
+| 항목 | 값 |
+|---|---|
+| 수집 | 상품 1,016개 → Codex 정리 1,002개(글자 부족 14개 제외) → 정답 생성 951개(근거 문구 부족 51개 제외) |
+| 묶음 | 작가 165명 = 묶음 165개. val은 9개 묶음, 상품 51개 |
+| 이미지 과제(`vlm`) | 분석 574 (train 550 / val 24), 판정 444, revise 380 |
+| 도구 대화(`agent`) | 초안 951, 편집 1,902(7종), 렌더 161 |
+| 학습용(`mlx-vlm`) | train 10,084 / validation 562 샘플(도구 대화 턴 8,752) |
+| 학습 run-1 | LoRA rank 16, alpha 32, 학습률 1e-4, batch 1, 2,000스텝(전체의 약 20%), 경합 없이 약 11초/스텝 |
+
 ## 출처와 권리
 
 | 항목 | 내용 |
