@@ -343,9 +343,11 @@ def build(args: argparse.Namespace) -> int:
     cache.mkdir(exist_ok=True)
 
     def conversations(job) -> list[tuple[str, str, dict]]:
-        product_id, analysis, render = job[0], job[7], job[8]
+        product_id, hints, profile, extras, analysis, render = job[0], job[2], job[3], job[6], job[7], job[8]
         head = [("analysis", "vlm", analysis)] if analysis else []
-        cached = cache / f"{product_id}-{'render' if render else 'norender'}.json"
+        # Keyed by everything the conversations depend on, so changed inputs are rebuilt, not reused.
+        inputs = json.dumps([hints.model_dump(mode="json"), profile.model_dump(mode="json"), render, len(extras)], ensure_ascii=False)
+        cached = cache / f"{product_id}-{hashlib.sha256(inputs.encode()).hexdigest()[:16]}.json"
         if cached.exists():
             return head + [tuple(row) for row in json.loads(cached.read_text(encoding="utf-8"))]
         try:

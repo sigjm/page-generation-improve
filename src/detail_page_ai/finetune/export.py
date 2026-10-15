@@ -15,7 +15,8 @@ def group_products(
     a series story), form one group, so near-duplicates never land on both sides of the split.
 
     ``products`` maps product id → {image sha256 → cleaned OCR lines of that image}.
-    Images whose cleaned text is empty (shop-wide banners) and empty brands do not link products.
+    Images whose cleaned text is empty, images shared by more than one artist (shop-wide banners
+    such as About the Artist or K-RIBBON) and empty brands do not link products.
     """
     parent = {product_id: product_id for product_id in products}
 
@@ -25,8 +26,14 @@ def group_products(
             item = parent[item]
         return item
 
+    artists_of: dict[str, set[str]] = {}  # only known when brands are given
+    for product_id, images in products.items():
+        for image_hash in images:
+            if brands and brands.get(product_id):
+                artists_of.setdefault(image_hash, set()).add(brands[product_id])
     owner: dict[str, str] = {}
     for product_id, images in sorted(products.items()):
+        images = {h: lines for h, lines in images.items() if len(artists_of.get(h, ())) <= 1}
         brand = (brands or {}).get(product_id, "")
         for image_hash, lines in [*images.items(), *([(f"brand:{brand}", [brand])] if brand else [])]:
             if not lines:

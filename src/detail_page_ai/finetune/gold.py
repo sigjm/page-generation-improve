@@ -26,7 +26,7 @@ from .crawl import ProductPage
 
 BOILERPLATE = re.compile(
     r"연출(된)? ?이미지|A/S|고객센터|상담\s*시간|\d{3,4}-\d{4}|배송|교환|반품|copyright"
-    r"|작가의 또 다른 상품|작가 페이지"  # shop-wide banner under every product
+    r"|작가의 또 다른 상품|작가 페이지|^About$|^the Artist$"  # shop-wide banner under every product
     r"|^(19|20)\d{2}(?!\d)",  # artist CV lines ("2022 ... Fair (Seoul)") shared across a series
     re.I,
 )

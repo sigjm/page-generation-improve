@@ -346,3 +346,21 @@ def test_draft_summary_reports_what_the_tools_returned():
     assert f"블록 {len(blocks)}개" in summary
     assert blocks[0].split(":")[1] in summary
     assert "다시 확인한 문구 1개" in summary
+
+
+def test_images_shared_by_several_artists_do_not_link_products():
+    # Shop-wide banners (About the Artist, K-RIBBON) carry text but are not a series.
+    banner = hashlib.sha256(b"k-ribbon").hexdigest()
+    series = hashlib.sha256(b"series").hexdigest()
+    products = {"1": {banner: ["우수공예품"]}, "2": {banner: ["우수공예품"]}, "3": {series: ["시리즈 이야기"]}, "4": {series: ["시리즈 이야기"]}}
+
+    groups = group_products(products, brands={"1": "김", "2": "이", "3": "박", "4": "박"})
+
+    assert groups["1"] != groups["2"]
+    assert groups["3"] == groups["4"]
+
+
+def test_about_the_artist_banner_lines_are_boilerplate():
+    from detail_page_ai.finetune.gold import clean_ocr_lines
+
+    assert clean_ocr_lines(["About", "the Artist", "손으로 빚은 찻잔입니다."]) == ["손으로 빚은 찻잔입니다."]
