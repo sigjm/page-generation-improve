@@ -1,0 +1,39 @@
+# Codex 교차 검토 3: 최종 구성 스모크 데이터 (2026-10-15)
+
+`codex exec -s read-only`(xhigh, Fast)로 받은 검토 원문입니다. 대상은 최종 구성(9B + Qwen-Image 2.1 4bit, Codex 교사)으로 만든 상품 5개 스모크 데이터와 mlx-vlm 학습용 내보내기입니다. 반영 내용은 설계 문서 10장에 있습니다.
+
+## 반드시 고칠 것
+
+- **렌더 턴의 도구 정의가 실제 학습 타깃과 어긋납니다.** 런타임은 호출 상한에 도달한 도구를 다음 요청의 도구 목록에서 뺍니다([loop.py:139](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/agent/loop.py:139), [tools.py:382](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/agent/tools.py:382)). 그런데 기록기는 마지막 요청의 도구 목록만 저장하고([conversations.py:79](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/finetune/conversations.py:79)), 턴 분할 후에도 그 목록을 모든 샘플에 붙입니다([export.py:84](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/finetune/export.py:84)). 그 결과 `prepare_photos` 타깃에 해당 정의가 없는 행이 train·validation에 각각 3개, `inspect_render` 타깃에 정의가 없는 행도 각각 6개·2개 있습니다. 예: [mlx-vlm/train.jsonl:24](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/mlx-vlm/train.jsonl:24), [:29](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/mlx-vlm/train.jsonl:29), [mlx-vlm/validation.jsonl:16](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/mlx-vlm/validation.jsonl:16). **총 12개 타깃**이 호출할 도구 정의 없이 학습됩니다. 턴별 도구 스키마를 보존해 내보내야 합니다.
+
+- **사진 ID 회복 후에도 렌더 프롬프트의 조건을 어깁니다.** 런타임은 `generated_scene`·`generated_view`만 `inspect_image`로 검사하라고 합니다([prompts.py:27](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/agent/prompts.py:27)). 각본은 잘못된 섹션 ID 뒤 첫 비영웅 사진 ID인 `packshot`을 고르며([conversations.py:232](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/finetune/conversations.py:232)), 네 렌더 행 모두 그 사진은 `source` 또는 `source_composite`입니다. `kcdf-2365-agent_render-0`, `kcdf-2390-agent_render-0`, `kcdf-2402-agent_render-0`, `kcdf-2411-agent_render-0`([agent/train.jsonl:4](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/agent/train.jsonl:4), [agent/val.jsonl:4](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/agent/val.jsonl:4))에서 동일합니다. ID 오류 회복 자체는 있지만, 회복 뒤 호출이 런타임의 검사 대상 규칙과 다릅니다.
+
+- **`revise_copy`의 유일한 예제가 학습 분할에 없습니다.** 정리된 응답은 `creator-provided`로 맞고 기존 문구를 보존합니다([vlm/val.jsonl:2](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/vlm/val.jsonl:2)). 하지만 `stats.json`에서 revise는 1건이고 전부 validation입니다([stats.json:27](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/stats.json:27)). 실제 학습 행에서 revise 동작을 가르치려면 train 그룹의 revise 예제가 필요합니다.
+
+- **분석 프롬프트의 본문이 현재 호출 입력·출력과 모순됩니다.** VLM 행은 현행 프롬프트를 그대로 사용하지만([vlm/train.jsonl:1](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/vlm/train.jsonl:1)), 프롬프트는 입력을 “3~12개 이미지 참조”라고 설명하고 예전 `{order, tag, text, imageUrl}` 계약을 제시합니다([prompts.py:273](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/prompts.py:273)). 실제 `analyze_photos`는 대표 사진 하나만 분석기에 전달하고([tools.py:169](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/agent/tools.py:169)), 출력은 `ProductProfileDto`입니다([adapters.py:89](/Users/jmllem/PycharmProjects/page-generation-improve/src/local_detail_page_ai/adapters.py:89)). 데이터가 현재 프롬프트를 복제한다는 점은 맞지만, 그 프롬프트가 잘못된 계약을 계속 학습시킵니다.
+
+## 고치면 좋은 것
+
+- **Qwen-Image 생성 경로는 일부만 확인됩니다.** 네 `agent_render` 행 모두 `lifestyle`, `detail-02`~`detail-05` 생성 실패와 소스 fallback을 기록합니다. 세 행의 `packshot`은 `source_composite`라 Qwen 생성 배경이 합성됐을 가능성은 있지만, `photo_summary`가 `background_generated`를 내보내지 않아 행만으로 확정할 수 없습니다([tools.py:259](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/agent/tools.py:259)). 성공한 생성 장면·디테일 검사 사례를 포함하려는 목적이라면 보완하고, 데이터셋 카드에도 성공·fallback 구성을 명시하세요.
+
+- **정리된 텍스트에 띄어쓰기 파손이 남습니다.** `kcdf-2365-agent_draft-0`의 `관리해 주 세요`, `있 을 수`, `kcdf-2366-agent_draft-0`의 `있 을 수`, `kcdf-2402-agent_draft-0`·`kcdf-2402-analysis-0`의 `충분 히`가 입력 또는 유의사항에 남아 있습니다([agent/train.jsonl:1](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/agent/train.jsonl:1), [:5](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/agent/train.jsonl:5), [:8](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/agent/train.jsonl:8)). 원문 보존 검증과 별도로 추출 단계에서 이런 어절 분리를 검토하는 편이 좋습니다.
+
+- **교사 판정은 육안상 대체로 타당하지만 양성과 검증이 부족합니다.** 확인한 13개 inspect 응답에서 뚜렷한 시각 오판은 보이지 않았고, `kcdf-2365-inspect-2`의 갤러리 빈 영역 지적은 이미지와 맞습니다. 다만 `has_problem`이 있는 12건 중 양성은 1건뿐입니다. 현재 필터는 응답 필드와 인용 문자열만 검사하고 시각 판정의 정답성은 확인하지 않습니다([export.py:68](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/finetune/export.py:68)). 1,000개로 확대하기 전에 오류 사례와 표본 검수를 늘리세요.
+
+- **일부 정리 결과가 중복되거나 제목과 내용이 맞지 않습니다.** `kcdf-2411-analysis-0`에는 `하양 무광의 질감`과 `하얀 무광의 담백한 질감`이 별도 특징으로 들어가 내용이 겹칩니다([vlm/train.jsonl:11](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/vlm/train.jsonl:11)). `kcdf-2390-agent_edit_add_notice-0`은 관리 섹션에 목재 색·결의 개체 차이 안내를 넣습니다([agent/val.jsonl:2](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/agent/val.jsonl:2)). 문장 출처가 정확한지뿐 아니라 항목 역할도 검토해야 합니다.
+
+- **초안의 `finish` 요약은 여전히 각본형입니다.** 렌더 요약은 도구 결과에서 사진·섹션 수와 경고를 읽어오지만([conversations.py:239](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/finetune/conversations.py:239)), 초안 요약은 프로필 개수와 `revise`·사진 검사 플래그로 미리 만듭니다([conversations.py:203](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/finetune/conversations.py:203)). 실제 grounding 결과를 반영하도록 보완하면 좋습니다.
+
+- **이 smoke 분할은 평가용으로 너무 작습니다.** 상품 5개가 모두 `인테리어`이고 4개 그룹 중 validation은 작가 한 명·상품 한 개뿐입니다([meta.jsonl:14](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/meta.jsonl:14), [stats.json:26](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/stats.json:26)). 현재 그룹·작가 분리는 누수 없이 반영됐지만, 1,000개에서는 카테고리와 작업 종류별 분포도 함께 관리해야 합니다.
+
+## 그대로 둬도 되는 것
+
+- **근거 라벨, 이전 OCR 오타, 유의사항 잔여물은 실제 행에서 해결됐습니다.** 다섯 analysis의 판매자 문구·특징·표 항목은 `creator-provided`입니다. `고측`은 없고 `곁을 은은하게 밝혀주는` 표현이 입력에 남아 있습니다. 이전 `상품리뷰`·`상품문의`·HTML 주석 잔여물도 최종 입력·정답에서 찾지 못했습니다. 입력의 상품정보 표 줄도 `making_method`에 포함됩니다.
+
+- **오류 회복 신호와 렌더 요약은 들어갔습니다.** `kcdf-2365-agent_draft-0`에는 잘못된 `layout_id` 뒤 재호출, `kcdf-2402-agent_draft-0`에는 분석 전 grounding 오류 뒤 분석 호출이 있습니다. 렌더 행은 섹션명을 사진 ID로 넣은 오류와 유효 ID 재호출, 두 번의 `inspect_render`를 포함합니다. `kcdf-2365-agent_render-0`의 `finish`에는 갤러리 검수 경고가 반영됩니다.
+
+- **MLX 형식의 기본 구조와 이미지 경로는 맞습니다.** 총 96행(학습 73, 검증 23)이며, 그중 에이전트 턴 샘플은 77개입니다. 각 샘플은 새 assistant 턴 하나를 타깃으로 만들고 이전 턴은 문맥으로 보존합니다([export.py:84](/Users/jmllem/PycharmProjects/page-generation-improve/src/detail_page_ai/finetune/export.py:84)). 도구 정의를 system에 넣는 방식도 적용됐고([prepare_mlx_vlm_sft.py:23](/Users/jmllem/PycharmProjects/page-generation-improve/scripts/dataset/prepare_mlx_vlm_sft.py:23)), VLM 이미지 경로는 현재 모두 존재합니다. 앞서 적은 12개 렌더 타깃의 도구 정의 누락은 별도 예외입니다.
+
+- **상품·작가 그룹 분리는 이 샘플에서 일관됩니다.** 2365와 2366은 같은 그룹으로 train에 있고, validation의 2390 작가는 train에 없습니다([meta.jsonl:1](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/meta.jsonl:1), [:14](/Users/jmllem/PycharmProjects/page-generation-improve/.local/finetune/work/smoke/dataset/meta.jsonl:14)). LoRA 병합 스크립트도 병합 가중치와 함께 기본 모델의 토크나이저·템플릿·프로세서 파일을 복사하는 구조입니다([fuse_lora.py:28](/Users/jmllem/PycharmProjects/page-generation-improve/scripts/dataset/fuse_lora.py:28)).
+
+파일은 읽기만 했고 수정하지 않았습니다.
