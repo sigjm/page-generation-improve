@@ -304,8 +304,10 @@ def build(args: argparse.Namespace) -> int:
     for product_id, (product_dir, record, structured, per_image) in products.items():
         page = _page(product_dir)
         category = record["category"]
-        if not record["images"]["main"] or not (page.spec.get("소재") or page.spec.get("용도")):
-            stats["skip:no-main-or-spec"] += 1
+        # No spec-table requirement: products migrated from the old shop (73%) have none and keep
+        # their facts in the detail images, which reach the model through the OCR text.
+        if not record["images"]["main"]:
+            stats["skip:no-main-image"] += 1
             continue
         hints = build_user_hints(page, ocr_lines(product_dir))
         kept = validate_structured(Structured.model_validate(structured["raw"]), hint_lines(hints), page=page)
